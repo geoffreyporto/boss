@@ -24,6 +24,8 @@ use regex::Regex;
 //     baseball::Level{code: "win", name: "Winter", class: "W", rank: 7},
 // ];
 
+///Testing a small change
+
 #[derive(Deserialize, Serialize, Debug)]
 enum HomeAway {
     #[serde(rename="home")]
