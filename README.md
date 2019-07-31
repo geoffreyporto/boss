@@ -1,7 +1,8 @@
-baseball
+rust-baseball
 ===
 
-A pure Rust baseball data aggregation and analytics library.
+A pure Rust baseball data aggregation and analytics library. 
+Currently only does some aggregation from the MLB GameDay XML files
 
 ### Documentation
 
@@ -19,7 +20,7 @@ baseball = "0.1"
 
 ### Design Goals
 
-Building a baseball data engine in Rust will enable everyday fans to perform data-intensive workloads, or efficient data gathering.
+Building a baseball data engine in Rust will enable everyday fans to perform data-intensive workloads, as well as efficient data gathering.
 
 This project is also a learning project and should change a lot as the author better hones his Rust skills.
 
