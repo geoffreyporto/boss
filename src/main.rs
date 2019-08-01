@@ -4,6 +4,8 @@ use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use csv::Writer;
 use regex::Regex;
+use std::error;
+use std::fmt;
 
 /// Step 1: 
 ///     For any given day and level, scan the xml file for that day and return all gameday links.
@@ -134,6 +136,51 @@ struct BoxScoreData {
     attendance: Option <u32>,
 }
 
+#[derive(Debug, Deserialize)]
+enum GameDayError {
+    #[serde(skip_deserializing)]
+    Request(reqwest::Error),
+    #[serde(skip_deserializing)]
+    XMLParse(serde_xml_rs::Error),
+}
+
+impl fmt::Display for GameDayError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            GameDayError::Request(ref err) => write!(f, "Reqwest Error: {}", err),
+            GameDayError::XMLParse(ref err) => write!(f, "XML Parse Error: {}", err),
+        }
+    }
+}
+
+impl error::Error for GameDayError {
+    fn description(&self) -> &str {
+        match *self {
+            GameDayError::Request(ref err) => err.description(),
+            GameDayError::XMLParse(ref err) => err.description(),
+        }
+    }
+    fn cause(&self) -> Option<&error::Error> {
+        match *self {
+            GameDayError::Request(ref err) => Some(err),
+            GameDayError::XMLParse(ref err) => Some(err),
+        }
+    }
+}
+
+
+impl From<reqwest::Error> for GameDayError {
+    fn from(err: reqwest::Error) -> GameDayError {
+        GameDayError::Request(err)
+    }
+}
+
+impl From<serde_xml_rs::Error> for GameDayError {
+    fn from(err: serde_xml_rs::Error) -> GameDayError {
+        GameDayError::XMLParse(err)
+    }
+}
+
 fn game_day_url (level: &str, year: &str, month: &str, day: &str) -> String {
 
     String::from("http://gd2.mlb.com/components/game/") + level 
@@ -160,6 +207,7 @@ fn game_day_links (url: &str) -> Vec<String> {
     }
 }
 
+
 fn players_parse (url: &str) -> (Option<Game>) {
     
     let resp = reqwest::get(url);
@@ -176,6 +224,12 @@ fn players_parse (url: &str) -> (Option<Game>) {
     
 }
 
+fn linescore_parse_2 (url: &str) -> Result <LineScoreMetaData, GameDayError> {
+
+    let xml = reqwest::get(url)?.text()?.replace('&', "&amp;");
+    serde_xml_rs::from_str(&xml)?
+
+}
 
 fn linescore_parse (url: &str) -> Option<LineScoreMetaData> {
     
@@ -250,6 +304,8 @@ fn boxscore_parse (url: &str) -> Option<BoxScoreData> {
 }
 
 
+
+
 // #[derive(Debug, Deserialize)]
 // enum ParseError {
 //     #[serde(skip_deserializing)]
@@ -276,17 +332,6 @@ fn boxscore_parse (url: &str) -> Option<BoxScoreData> {
 // }
 
 
-// fn linescore_parse_2 (url: &str) -> Result <LineScoreMetaData, serde_xml_rs::Error> {
-
-//     match reqwest::get(url).unwrap().text().unwrap().replace('&', "&amp;") {
-//         Ok(xml) => serde_xml_rs::from_str(&xml),
-//         Err(_)
-//     }
-//     // dbg!(&xml);
-//     // let tmp:LineScoreMetaData = serde_xml_rs::from_str(&xml).unwrap();
-//     // dbg!(tmp);
-    
-// }
 
 
 fn main () {
