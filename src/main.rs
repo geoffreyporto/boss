@@ -3,7 +3,6 @@ use reqwest;
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use csv::Writer;
-use regex::Regex;
 use std::error;
 use std::fmt;
 
@@ -108,7 +107,7 @@ struct GameUmpires {
 
 
 #[derive(Deserialize, Serialize, Debug)]
-struct LineScoreMetaData {
+struct LineScoreData {
     game_pk: u32,
     game_type: char,
     venue: String,
@@ -136,12 +135,54 @@ struct BoxScoreData {
     attendance: Option <u32>,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+struct GameData {
+    linescore: LineScoreData,
+    boxscore: BoxScoreData,
+}
+
+impl GameData {
+    fn new(boxscore: BoxScoreData, linescore: LineScoreData) -> Self {
+        GameData {
+            boxscore,
+            linescore,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WeatherMissingError {
+    err_msg: String,
+}
+
+impl fmt::Display for WeatherMissingError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Missing Weather Data for: {}", self.err_msg.to_owned())
+    }
+}
+
+impl WeatherMissingError {
+    fn error(msg: &str) -> Self {
+        WeatherMissingError {
+            err_msg: msg.to_string()
+        }
+    }
+}
+
+impl error::Error for WeatherMissingError {
+    fn description(&self) -> &str {
+        &self.err_msg
+    }
+}
+
 #[derive(Debug, Deserialize)]
 enum GameDayError {
     #[serde(skip_deserializing)]
     Request(reqwest::Error),
     #[serde(skip_deserializing)]
     XMLParse(serde_xml_rs::Error),
+    #[serde(skip_deserializing)]
+    Weather(WeatherMissingError),    
 }
 
 impl fmt::Display for GameDayError {
@@ -149,6 +190,7 @@ impl fmt::Display for GameDayError {
         match *self {
             GameDayError::Request(ref err) => write!(f, "Reqwest Error: {}", err),
             GameDayError::XMLParse(ref err) => write!(f, "XML Parse Error: {}", err),
+            GameDayError::Weather(ref err) => write!(f, "Weather Error: {}", err),
         }
     }
 }
@@ -158,12 +200,14 @@ impl error::Error for GameDayError {
         match *self {
             GameDayError::Request(ref err) => err.description(),
             GameDayError::XMLParse(ref err) => err.description(),
+            GameDayError::Weather(ref err) => err.description(),
         }
     }
     fn cause(&self) -> Option<&error::Error> {
         match *self {
             GameDayError::Request(ref err) => Some(err),
             GameDayError::XMLParse(ref err) => Some(err),
+            GameDayError::Weather(ref err) => Some(err),
         }
     }
 }
@@ -178,6 +222,12 @@ impl From<reqwest::Error> for GameDayError {
 impl From<serde_xml_rs::Error> for GameDayError {
     fn from(err: serde_xml_rs::Error) -> GameDayError {
         GameDayError::XMLParse(err)
+    }
+}
+
+impl From<WeatherMissingError> for GameDayError {
+    fn from(err: WeatherMissingError) -> GameDayError {
+        GameDayError::Weather(err)
     }
 }
 
@@ -224,14 +274,96 @@ fn players_parse (url: &str) -> (Option<Game>) {
     
 }
 
-fn linescore_parse_2 (url: &str) -> Result <LineScoreMetaData, GameDayError> {
 
-    let xml = reqwest::get(url)?.text()?.replace('&', "&amp;");
-    serde_xml_rs::from_str(&xml)?
+fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, GameDayError> {
 
+    
+    let items = xml
+            .split("<b>")
+            .filter(|item| item.starts_with("Weather") || item.starts_with("Wind") || item.starts_with("Att") )
+            .filter(|item| item.contains(":"))
+            //We can unwrap safely, since we're guaranteed that split will return at least 2 elements
+            .map(|item| item.split(":").nth(1).unwrap().trim())
+            .collect::<Vec<&str>>();
+
+    // We want to throw an error if item[0] isn't weather or item[1] isn't "wind" 
+    // since this will cause errors downstream, or worse, we'll parse the wrong data
+
+    if items.len() < 2 
+        {return Err(GameDayError::from(WeatherMissingError::error("Not enough weather items")))};
+    if ! items[0].to_lowercase().contains("degrees") 
+        {return Err(GameDayError::from(WeatherMissingError::error("1st boxscore item missing temp")))};
+    if ! items[1].to_lowercase().contains("mph") 
+        {return Err(GameDayError::from(WeatherMissingError::error("2nd boxscore item missing wind speed")))};
+
+    Ok(items)
 }
 
-fn linescore_parse (url: &str) -> Option<LineScoreMetaData> {
+
+fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
+
+    let linescore_url = format!("{}linescore.xml", url);
+    let boxscore_url = format!("{}boxscore.xml", url);
+
+    let linescore_xml = reqwest::get(&linescore_url)?.text()?.replace('&', "&amp;");
+    let linescore = serde_xml_rs::from_str(&linescore_xml)?;
+
+    let boxscore_xml = reqwest::get(&boxscore_url)?.text()?.replace('&', "&amp;");
+    
+
+    let items: Vec<&str> = boxscore_xml
+                .split("<b>")
+                .filter(|item|item.starts_with("Weather") || item.starts_with("Wind") || item.starts_with("Att") )
+                .map(|item| item.split(":").nth(1).unwrap().trim())
+                .collect();
+               
+    let weather_temp: u8 = items[0]
+            .split(" ").nth(0).unwrap()
+            .parse().unwrap();
+    let weather_condition = items[0]
+            .split(",").nth(1).unwrap()
+            .split("<").nth(0).unwrap()
+            .trim_end_matches(".").trim().to_string();
+    
+    let wind_speed:u8 = items[1]
+            .split(" ").nth(0).unwrap()
+            .parse().unwrap();
+    let wind_direction = items[1]
+            .split(",").nth(1).unwrap()
+            .split("<").nth(0).unwrap()
+            .trim_end_matches(".").trim().to_string();
+
+    let attendance: Option <u32> =
+        if items.len() > 2 {
+            let att_temp = items[2]
+                .replace(":", "")
+                .replace(",", "")
+                .replace(".", "")
+                .split("<").nth(0).unwrap()
+                .trim().to_string();
+            Some (att_temp.parse().unwrap())
+        }
+        else {
+            None
+    };
+
+    let boxscore = BoxScoreData {
+        weather_temp,
+        weather_condition,
+        wind_speed,
+        wind_direction,
+        attendance,
+    };
+
+    let game_data = GameData::new(
+        boxscore,
+        linescore,
+    );
+
+    Ok(game_data)
+}
+
+fn linescore_parse (url: &str) -> Option<LineScoreData> {
     
     let resp = reqwest::get(url);
 
@@ -303,37 +435,6 @@ fn boxscore_parse (url: &str) -> Option<BoxScoreData> {
     }
 }
 
-
-
-
-// #[derive(Debug, Deserialize)]
-// enum ParseError {
-//     #[serde(skip_deserializing)]
-//     ReqwestError(reqwest::Error),
-//     #[serde(skip_deserializing)]
-//     SerdeError(serde_xml_rs::Error),
-// }
-
-// impl From<reqwest::Error> for ParseError {
-//     fn from(err: reqwest::Error) -> ParseError {
-//         ParseError::ReqwestError(err)
-//     }
-// }
-
-// impl From<serde_xml_rs::Error> for ParseError {
-//     fn from(err: serde_xml_rs::Error) -> ParseError {
-//         ParseError::SerdeError(err)
-//     }
-// }
-
-// fn get_xml (url: &str) -> Result<String, reqwest::Error> {
-//     reqwest::get(url)?.text()?
-    
-// }
-
-
-
-
 fn main () {
 
     let url = game_day_url("mlb", "2008", "06", "10");
@@ -343,6 +444,13 @@ fn main () {
                     .map(|game| game.to_string() + "players.xml")
                     .filter_map(|url| players_parse(&url))
                     .collect::<Vec<_>>();
+
+    dbg!(game_download_parse("http://gd2.mlb.com/components/game/mlb/year_2008/month_06/day_10/gid_2008_06_10_chamlb_detmlb_1/"));
+
+    let test_string_01 = r"<span>Contreras pitched to 3 batters in the 7th.</span><br/><br/><span><b>Game Scores</b>: Contreras , Robertson, N .</span><br/><span><b>WP</b>: Dolsi.</span><br/><span><b>Balk</b>: Dolsi.</span><br/><span><b>Pitches-strikes</b>: Contreras 98-67, Dotel 17-14, Logan 5-2, Robertson, N 87-53, Dolsi 23-14, Jones, T 17-8.</span><br/><span><b>Groundouts-flyouts</b>: Contreras 8-5, Dotel 0-0, Logan 0-1, Robertson, N 6-4, Dolsi 1-1, Jones, T 1-1.</span><br/><span><b>Batters faced</b>: Contreras 31, Dotel 5, Logan 1, Robertson, N 26, Dolsi 7, Jones, T 4.</span><br/><span><b>Inherited runners-scored</b>: Dotel 2-0, Logan 1-0, Dolsi 3-1.</span><br/><b>Umpires</b>: HP: Ed Montague. 1B: Jim Wolf. 2B: Phil Cuzzi. 3B: Chris Tiller. <br/><b>Weather</b>: 75 degrees, partly cloudy.<br/><b>Wind</b>: 10 mp, Out to LF.<br/><b>T</b>: 2:34.<br/><b>Att</b>: 38,295.<br/><b>Venue</b>: Comerica Park.<br/><b>June 10, 2008</b><br/>";
+
+    let result = split_boxscore_xml(test_string_01);
+    dbg!(result);
 
     // let linescores = games.par_iter()
     //                 .map(|game| game.to_string() + "linescore.xml")
@@ -437,9 +545,6 @@ fn main () {
 
     // dbg!(umpire_hp_name);
     
-    let regex = r#"(<umpires>.*</umpires>)"#;
-    let player_regex = Regex::new(regex).unwrap();
-
     // let umpires = player_regex.captures(&players_xml).unwrap();
     // dbg!(&umpires);
 
