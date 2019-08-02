@@ -307,6 +307,17 @@ fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, WeatherMissingError> {
     Ok(items)
 }
 
+fn parse_weather (item: &str) -> Result<(u8, String), num::ParseIntError> {
+    
+    // The split_boxscore_xml function checks that the characters we're splitting on are there so we 
+    // can safely unwrap any .nth() calls that we do after splitting
+    Ok((
+        item.split(" ").nth(0).unwrap().parse()?,
+        item.split(",").nth(1).unwrap()
+            .split("<").nth(0).unwrap()
+            .trim_end_matches(".").trim().to_string()
+    ))
+}
 
 fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
 
@@ -320,30 +331,16 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     
     let items = split_boxscore_xml(&boxscore_xml)?;
 
-    // The split_boxscore_xml function checks that the characters we're splitting on are there so we 
-    // can safely unwrap any .nth() calls that we do after splitting
-
-    let weather_temp: u8 = items[0].split(" ").nth(0).unwrap().parse()?;
-    let weather_condition = items[0]
-            .split(",").nth(1).unwrap()
-            .split("<").nth(0).unwrap()
-            .trim_end_matches(".").trim().to_string();
-    
-    let wind_speed:u8 = items[1].split(" ").nth(0).unwrap().parse()?;
-    let wind_direction = items[1]
-            .split(",").nth(1).unwrap()
-            .split("<").nth(0).unwrap()
-            .trim_end_matches(".").trim().to_string();
+    let (weather_temp, weather_condition) = parse_weather(items[0])?;
+    let (wind_speed, wind_direction) = parse_weather(items[1])?;
 
     let attendance: Option <u32> =
         if items.len() > 2 {
             let att_temp = items[2]
-                .replace(":", "")
-                .replace(",", "")
-                .replace(".", "")
+                .replace(":", "").replace(",", "").replace(".", "")
                 .split("<").nth(0).unwrap()
                 .trim().to_string();
-            Some (att_temp.parse().unwrap())
+            Some (att_temp.parse()?)
         }
         else {
             None
@@ -449,7 +446,7 @@ fn main () {
 
     dbg!(game_download_parse("http://gd2.mlb.com/components/game/mlb/year_2008/month_06/day_10/gid_2008_06_10_chamlb_detmlb_1/"));
 
-    let test_string_01 = r"<span>Contreras pitched to 3 batters in the 7th.</span><br/><br/><span><b>Game Scores</b>: Contreras , Robertson, N .</span><br/><span><b>WP</b>: Dolsi.</span><br/><span><b>Balk</b>: Dolsi.</span><br/><span><b>Pitches-strikes</b>: Contreras 98-67, Dotel 17-14, Logan 5-2, Robertson, N 87-53, Dolsi 23-14, Jones, T 17-8.</span><br/><span><b>Groundouts-flyouts</b>: Contreras 8-5, Dotel 0-0, Logan 0-1, Robertson, N 6-4, Dolsi 1-1, Jones, T 1-1.</span><br/><span><b>Batters faced</b>: Contreras 31, Dotel 5, Logan 1, Robertson, N 26, Dolsi 7, Jones, T 4.</span><br/><span><b>Inherited runners-scored</b>: Dotel 2-0, Logan 1-0, Dolsi 3-1.</span><br/><b>Umpires</b>: HP: Ed Montague. 1B: Jim Wolf. 2B: Phil Cuzzi. 3B: Chris Tiller. <br/><b>Weather</b>: 75 degrees, partly cloudy.<br/><b>Wind</b>: 10 mp, Out to LF.<br/><b>T</b>: 2:34.<br/><b>Att</b>: 38,295.<br/><b>Venue</b>: Comerica Park.<br/><b>June 10, 2008</b><br/>";
+    let test_string_01 = r"<span>Contreras pitched to 3 batters in the 7th.</span><br/><br/><span><b>Game Scores</b>: Contreras , Robertson, N .</span><br/><span><b>WP</b>: Dolsi.</span><br/><span><b>Balk</b>: Dolsi.</span><br/><span><b>Pitches-strikes</b>: Contreras 98-67, Dotel 17-14, Logan 5-2, Robertson, N 87-53, Dolsi 23-14, Jones, T 17-8.</span><br/><span><b>Groundouts-flyouts</b>: Contreras 8-5, Dotel 0-0, Logan 0-1, Robertson, N 6-4, Dolsi 1-1, Jones, T 1-1.</span><br/><span><b>Batters faced</b>: Contreras 31, Dotel 5, Logan 1, Robertson, N 26, Dolsi 7, Jones, T 4.</span><br/><span><b>Inherited runners-scored</b>: Dotel 2-0, Logan 1-0, Dolsi 3-1.</span><br/><b>Umpires</b>: HP: Ed Montague. 1B: Jim Wolf. 2B: Phil Cuzzi. 3B: Chris Tiller. <br/><b>Weather</b>: 75 degrees, partly cloudy.<br/><b>Wind</b>: 10 mph, Out to LF.<br/><b>T</b>: 2:34.<br/><b>Att</b>: 38,295.<br/><b>Venue</b>: Comerica Park.<br/><b>June 10, 2008</b><br/>";
 
     let result = split_boxscore_xml(test_string_01);
     dbg!(result);
