@@ -3,8 +3,7 @@ use reqwest;
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use csv::Writer;
-use std::error;
-use std::fmt;
+use std::{error, fmt, num};
 
 /// Step 1: 
 ///     For any given day and level, scan the xml file for that day and return all gameday links.
@@ -182,6 +181,8 @@ enum GameDayError {
     #[serde(skip_deserializing)]
     XMLParse(serde_xml_rs::Error),
     #[serde(skip_deserializing)]
+    ParseIntError(num::ParseIntError),
+    #[serde(skip_deserializing)]
     Weather(WeatherMissingError),    
 }
 
@@ -191,6 +192,7 @@ impl fmt::Display for GameDayError {
             GameDayError::Request(ref err) => write!(f, "Reqwest Error: {}", err),
             GameDayError::XMLParse(ref err) => write!(f, "XML Parse Error: {}", err),
             GameDayError::Weather(ref err) => write!(f, "Weather Error: {}", err),
+            GameDayError::ParseIntError(ref err) => write!(f, "Interger Parse Error: {}", err),
         }
     }
 }
@@ -201,6 +203,7 @@ impl error::Error for GameDayError {
             GameDayError::Request(ref err) => err.description(),
             GameDayError::XMLParse(ref err) => err.description(),
             GameDayError::Weather(ref err) => err.description(),
+            GameDayError::ParseIntError(ref err) => err.description(),
         }
     }
     fn cause(&self) -> Option<&error::Error> {
@@ -208,6 +211,7 @@ impl error::Error for GameDayError {
             GameDayError::Request(ref err) => Some(err),
             GameDayError::XMLParse(ref err) => Some(err),
             GameDayError::Weather(ref err) => Some(err),
+            GameDayError::ParseIntError(ref err) => Some(err),
         }
     }
 }
@@ -228,6 +232,12 @@ impl From<serde_xml_rs::Error> for GameDayError {
 impl From<WeatherMissingError> for GameDayError {
     fn from(err: WeatherMissingError) -> GameDayError {
         GameDayError::Weather(err)
+    }
+}
+
+impl From<num::ParseIntError> for GameDayError {
+    fn from(err: num::ParseIntError) -> GameDayError {
+        GameDayError::ParseIntError(err)
     }
 }
 
@@ -275,8 +285,7 @@ fn players_parse (url: &str) -> (Option<Game>) {
 }
 
 
-fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, GameDayError> {
-
+fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, WeatherMissingError> {
     
     let items = xml
             .split("<b>")
@@ -289,12 +298,11 @@ fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, GameDayError> {
     // We want to throw an error if item[0] isn't weather or item[1] isn't "wind" 
     // since this will cause errors downstream, or worse, we'll parse the wrong data
 
-    if items.len() < 2 
-        {return Err(GameDayError::from(WeatherMissingError::error("Not enough weather items")))};
-    if ! items[0].to_lowercase().contains("degrees") 
-        {return Err(GameDayError::from(WeatherMissingError::error("1st boxscore item missing temp")))};
-    if ! items[1].to_lowercase().contains("mph") 
-        {return Err(GameDayError::from(WeatherMissingError::error("2nd boxscore item missing wind speed")))};
+    if  items.len() < 2 {return Err(WeatherMissingError::error("Not enough weather items"))};
+    if !items[0].to_lowercase().contains(" degrees,") || !items[0].contains("<")
+        {return Err(WeatherMissingError::error("Weather data has wrong format"))};
+    if !items[1].to_lowercase().contains("mph,")  || !items[0].contains("<")
+        {return Err(WeatherMissingError::error("Wind data has wrong format"))};
 
     Ok(items)
 }
@@ -310,24 +318,18 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
 
     let boxscore_xml = reqwest::get(&boxscore_url)?.text()?.replace('&', "&amp;");
     
+    let items = split_boxscore_xml(&boxscore_xml)?;
 
-    let items: Vec<&str> = boxscore_xml
-                .split("<b>")
-                .filter(|item|item.starts_with("Weather") || item.starts_with("Wind") || item.starts_with("Att") )
-                .map(|item| item.split(":").nth(1).unwrap().trim())
-                .collect();
-               
-    let weather_temp: u8 = items[0]
-            .split(" ").nth(0).unwrap()
-            .parse().unwrap();
+    // The split_boxscore_xml function checks that the characters we're splitting on are there so we 
+    // can safely unwrap any .nth() calls that we do after splitting
+
+    let weather_temp: u8 = items[0].split(" ").nth(0).unwrap().parse()?;
     let weather_condition = items[0]
             .split(",").nth(1).unwrap()
             .split("<").nth(0).unwrap()
             .trim_end_matches(".").trim().to_string();
     
-    let wind_speed:u8 = items[1]
-            .split(" ").nth(0).unwrap()
-            .parse().unwrap();
+    let wind_speed:u8 = items[1].split(" ").nth(0).unwrap().parse()?;
     let wind_direction = items[1]
             .split(",").nth(1).unwrap()
             .split("<").nth(0).unwrap()
