@@ -1,16 +1,13 @@
 #![allow(unused)]
+/// baseball 
+///     
+/// **TODO** Add Documention to the root here
+
 use reqwest;
 use rayon::prelude::*;
-use serde::{Serialize, Deserialize};
-use csv::Writer;
+use serde::{Serialize, Deserialize, Deserializer};
 use std::{error, fmt, num};
-
-/// Step 1: 
-///     For any given day and level, scan the xml file for that day and return all gameday links.
-///     We can then loop through all possible days and years to get all the gameday files
-///     To do this, we'll need to create a constant that allows us to loop through a range of levels
-
-// pub mod baseball;
+// use csv::Writer;
 
 // // Enumerate all the baseball levels so that we can loop through a range of levels
 // const LEVELS: [baseball::Level; 8] = [
@@ -24,7 +21,31 @@ use std::{error, fmt, num};
 //     baseball::Level{code: "win", name: "Winter", class: "W", rank: 7},
 // ];
 
-///Testing a small change
+
+/// There are 7 levels to major league baseball, as well as winter ball. 
+/// You can use LEVEL_CODES to iterate through all the levels for any date range
+/// These codes show up in the root of the mlb gameday directories
+pub const LEVEL_CODES: [&'static str; 8] = ["mlb", "aaa", "aax", "afa", "afx", "asx", "rok", "win"];
+
+/// Level Names correspond to the long form representation of the levels
+pub const LEVEL_NAMES: [&'static str; 8] = ["Majors", "Triple A", "Double A", "High A", "Single A", "Low A", "Rookie", "Winter"];
+
+/// Level Class corresponds to the short form representation of the the levels
+pub const LEVEL_CLASS: [&'static str; 8] = ["MLB", "AAA", "AA", "A+", "A", "A-", "R", "W"];
+
+pub struct Levels {
+    codes: [&'static str; 8],
+    names: [&'static str; 8],
+    class: [&'static str; 8],
+}
+
+/// For convenience the codes, names and classes are gathered in to a LEVELS const struct
+pub const LEVELS:Levels = Levels {
+    codes: LEVEL_CODES,
+    names: LEVEL_NAMES,
+    class: LEVEL_CLASS,
+};
+
 
 #[derive(Deserialize, Serialize, Debug)]
 enum HomeAway {
@@ -71,7 +92,8 @@ struct Coach {
 struct Umpire {
     position: String,
     name: String,
-    id: String,
+    #[serde(deserialize_with = "empty_string_is_none")]
+    id: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -241,6 +263,21 @@ impl From<num::ParseIntError> for GameDayError {
     }
 }
 
+/// Overwrite default serde_xml behaviour to throw an error when trying to parse an empty
+/// string to a u32. Instead we return None, which makes a lot more sense
+fn empty_string_is_none<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error> 
+    where D: Deserializer<'de>,
+{
+    let n = u32::deserialize(deserializer);
+
+    if n.is_ok() {
+        Ok(Some(n.unwrap()))
+    }
+    else {
+        Ok(None)
+    }
+}
+
 fn game_day_url (level: &str, year: &str, month: &str, day: &str) -> String {
 
     String::from("http://gd2.mlb.com/components/game/") + level 
@@ -319,15 +356,28 @@ fn parse_weather (item: &str) -> Result<(u8, String), num::ParseIntError> {
     ))
 }
 
+/// Takes in a base url for each game, downloads all the relevant xml files and parses them
+/// 
+/// The linescore.xml file contains imporant metadata about the game, such as venue and date
+/// 
+/// The boxscore.xml file contains weather and attendance data, as well as a "linescore" section which we
+/// can use at some point to make sure we gathered correct play-play data. It will also tell us how many
+/// inning.xml files we'll need to pull
+/// 
+/// The players.xml file gives us the initial position of all the players as well as the coaches and umpires for the game
+/// 
+/// 
+
 fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
 
     let linescore_url = format!("{}linescore.xml", url);
     let boxscore_url = format!("{}boxscore.xml", url);
+    let players_url = format!("{}players.xml", url);
 
     let linescore_xml = reqwest::get(&linescore_url)?.text()?.replace('&', "&amp;");
     let linescore = serde_xml_rs::from_str(&linescore_xml)?;
 
-    let boxscore_xml = reqwest::get(&boxscore_url)?.text()?.replace('&', "&amp;");
+    let boxscore_xml = reqwest::get(&boxscore_url)?.text()?;
     
     let items = split_boxscore_xml(&boxscore_xml)?;
 
@@ -345,6 +395,13 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
         else {
             None
     };
+
+    let players_xml = reqwest::get(&players_url)?.text()?;
+
+    let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
+
+    dbg!(player_data); 
+    
 
     let boxscore = BoxScoreData {
         weather_temp,
@@ -444,12 +501,7 @@ fn main () {
                     .filter_map(|url| players_parse(&url))
                     .collect::<Vec<_>>();
 
-    dbg!(game_download_parse("http://gd2.mlb.com/components/game/mlb/year_2008/month_06/day_10/gid_2008_06_10_chamlb_detmlb_1/"));
-
-    let test_string_01 = r"<span>Contreras pitched to 3 batters in the 7th.</span><br/><br/><span><b>Game Scores</b>: Contreras , Robertson, N .</span><br/><span><b>WP</b>: Dolsi.</span><br/><span><b>Balk</b>: Dolsi.</span><br/><span><b>Pitches-strikes</b>: Contreras 98-67, Dotel 17-14, Logan 5-2, Robertson, N 87-53, Dolsi 23-14, Jones, T 17-8.</span><br/><span><b>Groundouts-flyouts</b>: Contreras 8-5, Dotel 0-0, Logan 0-1, Robertson, N 6-4, Dolsi 1-1, Jones, T 1-1.</span><br/><span><b>Batters faced</b>: Contreras 31, Dotel 5, Logan 1, Robertson, N 26, Dolsi 7, Jones, T 4.</span><br/><span><b>Inherited runners-scored</b>: Dotel 2-0, Logan 1-0, Dolsi 3-1.</span><br/><b>Umpires</b>: HP: Ed Montague. 1B: Jim Wolf. 2B: Phil Cuzzi. 3B: Chris Tiller. <br/><b>Weather</b>: 75 degrees, partly cloudy.<br/><b>Wind</b>: 10 mph, Out to LF.<br/><b>T</b>: 2:34.<br/><b>Att</b>: 38,295.<br/><b>Venue</b>: Comerica Park.<br/><b>June 10, 2008</b><br/>";
-
-    let result = split_boxscore_xml(test_string_01);
-    dbg!(result);
+    dbg!(game_download_parse("http://gd2.mlb.com/components/game/rok/year_2008/month_06/day_10/gid_2008_06_10_dinrok_dacrok_1/"));
 
     // let linescores = games.par_iter()
     //                 .map(|game| game.to_string() + "linescore.xml")
@@ -557,3 +609,8 @@ fn main () {
     // dbg!(linescore);
 
 }
+
+
+// Tests to run:
+// 1) Make sure we can parse empty values as None, as opposed to an integer error
+//          Test with this url: http://gd2.mlb.com/components/game/rok/year_2008/month_06/day_10/gid_2008_06_10_dinrok_dacrok_1/players.xml
