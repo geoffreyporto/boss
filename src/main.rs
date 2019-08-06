@@ -1,4 +1,4 @@
-#![allow(unused)]
+    #![allow(unused)]
 /// baseball 
 ///     
 /// **TODO** Add Documention to the root here
@@ -7,6 +7,8 @@ use reqwest;
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize, Deserializer};
 use std::{error, fmt, num};
+use std::collections::HashMap;
+
 // use csv::Writer;
 
 // // Enumerate all the baseball levels so that we can loop through a range of levels
@@ -112,18 +114,18 @@ struct Game {
 #[derive(Serialize, Debug)]
 #[allow(non_snake_case)]
 struct GameUmpires {
-    ump_HP_id: u32,
-    ump_1B_id: u32,
-    ump_2B_id: u32,
-    ump_3B_id: u32,
+    ump_HP_id: Option<u32>,
+    ump_1B_id: Option<u32>,
+    ump_2B_id: Option<u32>,
+    ump_3B_id: Option<u32>,
     ump_LF_id: Option<u32>,
     ump_RF_id: Option<u32>,
     ump_HP_name: String,
     ump_1B_name: String,
     ump_2B_name: String,
     ump_3B_name: String,
-    ump_LF_name: Option<String>,
-    ump_RF_name: Option<String>,
+    ump_LF_name: String,
+    ump_RF_name: String,
 }
 
 
@@ -321,6 +323,33 @@ fn players_parse (url: &str) -> (Option<Game>) {
     
 }
 
+#[allow(non_snake_case)]
+fn umpire_pivot (umpires: Vec<Umpire>) -> GameUmpires {
+
+    let umps: HashMap<String, (Option<u32>, String)> = umpires
+        .into_iter()
+        .map(|ump| (ump.position,(ump.id, ump.name)))
+        .collect::<HashMap<_,_>>();
+
+    let default = (None, String::new());
+
+    let (ump_HP_id, ump_HP_name) = umps.get("home").unwrap_or(&default).to_owned();
+    let (ump_1B_id, ump_1B_name) = umps.get("first").unwrap_or(&default).to_owned();
+    let (ump_2B_id, ump_2B_name) = umps.get("second").unwrap_or(&default).to_owned();
+    let (ump_3B_id, ump_3B_name) = umps.get("third").unwrap_or(&default).to_owned();
+    let (ump_LF_id, ump_LF_name) = umps.get("left").unwrap_or(&default).to_owned();
+    let (ump_RF_id, ump_RF_name) = umps.get("right").unwrap_or(&default).to_owned();
+
+    GameUmpires {
+        ump_HP_id, ump_HP_name,
+        ump_1B_id, ump_1B_name,
+        ump_2B_id, ump_2B_name,
+        ump_3B_id, ump_3B_name,
+        ump_LF_id, ump_LF_name,
+        ump_RF_id, ump_RF_name,
+    }
+
+}
 
 fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, WeatherMissingError> {
     
@@ -356,6 +385,15 @@ fn parse_weather (item: &str) -> Result<(u8, String), num::ParseIntError> {
     ))
 }
 
+fn parse_attendance (att: &str) -> Result<Option<u32>, num::ParseIntError> {
+    let attendance: u32 = att
+                .replace(":", "").replace(",", "").replace(".", "")
+                .split("<").nth(0).unwrap()
+                .trim().to_string()
+                .parse()?;
+    Ok( Some (attendance))
+}
+
 /// Takes in a base url for each game, downloads all the relevant xml files and parses them
 /// 
 /// The linescore.xml file contains imporant metadata about the game, such as venue and date
@@ -384,25 +422,16 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     let (weather_temp, weather_condition) = parse_weather(items[0])?;
     let (wind_speed, wind_direction) = parse_weather(items[1])?;
 
-    let attendance: Option <u32> =
-        if items.len() > 2 {
-            let att_temp = items[2]
-                .replace(":", "").replace(",", "").replace(".", "")
-                .split("<").nth(0).unwrap()
-                .trim().to_string();
-            Some (att_temp.parse()?)
-        }
-        else {
-            None
-    };
+    let attendance: Option<u32> = if items.len() > 2 {parse_attendance(items[2])?} else {None};
 
     let players_xml = reqwest::get(&players_url)?.text()?;
 
     let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
 
-    dbg!(player_data); 
+    let game_umps = umpire_pivot(player_data.umpires.umpires);
     
-
+    dbg!(game_umps); 
+    
     let boxscore = BoxScoreData {
         weather_temp,
         weather_condition,
@@ -501,8 +530,10 @@ fn main () {
                     .filter_map(|url| players_parse(&url))
                     .collect::<Vec<_>>();
 
-    dbg!(game_download_parse("http://gd2.mlb.com/components/game/rok/year_2008/month_06/day_10/gid_2008_06_10_dinrok_dacrok_1/"));
 
+
+    // dbg!(game_download_parse("http://gd2.mlb.com/components/game/rok/year_2008/month_06/day_10/gid_2008_06_10_dinrok_dacrok_1/"));
+    dbg!(game_download_parse("http://gd2.mlb.com/components/game/mlb/year_2018/month_10/day_09/gid_2018_10_09_bosmlb_nyamlb_1/"));
     // let linescores = games.par_iter()
     //                 .map(|game| game.to_string() + "linescore.xml")
     //                 .filter_map(|url| linescore_parse(&url))
