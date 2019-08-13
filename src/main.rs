@@ -430,18 +430,9 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
 
     let game_umps = umpire_pivot(player_data.umpires.umpires);
        
-    let boxscore = BoxScoreData {
-        weather_temp,
-        weather_condition,
-        wind_speed,
-        wind_direction,
-        attendance,
-    };
+    let boxscore = BoxScoreData {weather_temp, weather_condition, wind_speed, wind_direction, attendance};
 
-    let game_data = GameData::new(
-        boxscore,
-        linescore,
-    );
+    let game_data = GameData::new(boxscore, linescore);
 
     Ok(game_data)
 }
