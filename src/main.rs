@@ -429,9 +429,7 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
 
     let game_umps = umpire_pivot(player_data.umpires.umpires);
-    
-    dbg!(game_umps); 
-    
+       
     let boxscore = BoxScoreData {
         weather_temp,
         weather_condition,
