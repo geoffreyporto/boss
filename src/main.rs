@@ -265,8 +265,39 @@ impl From<num::ParseIntError> for GameDayError {
     }
 }
 
-/// Overwrite default serde_xml behaviour to throw an error when trying to parse an empty
-/// string to a u32. Instead we return None, which makes a lot more sense
+// Converts the Umpires struct into the GameUmpires struct
+// We need to pivot the umpires into defined fields, to flatten it out for our game metadata
+
+#[allow(non_snake_case)]
+impl From<Umpires> for GameUmpires {
+    fn from(umpires: Umpires) -> GameUmpires {
+        let umps: HashMap<String, (Option<u32>, String)> = umpires.umpires
+            .into_iter()
+            .map(|ump| (ump.position,(ump.id, ump.name)))
+            .collect::<HashMap<_,_>>();
+
+        let default = (None, String::new());
+
+        let (ump_HP_id, ump_HP_name) = umps.get("home").unwrap_or(&default).to_owned();
+        let (ump_1B_id, ump_1B_name) = umps.get("first").unwrap_or(&default).to_owned();
+        let (ump_2B_id, ump_2B_name) = umps.get("second").unwrap_or(&default).to_owned();
+        let (ump_3B_id, ump_3B_name) = umps.get("third").unwrap_or(&default).to_owned();
+        let (ump_LF_id, ump_LF_name) = umps.get("left").unwrap_or(&default).to_owned();
+        let (ump_RF_id, ump_RF_name) = umps.get("right").unwrap_or(&default).to_owned();
+
+        GameUmpires {
+            ump_HP_id, ump_HP_name,
+            ump_1B_id, ump_1B_name,
+            ump_2B_id, ump_2B_name,
+            ump_3B_id, ump_3B_name,
+            ump_LF_id, ump_LF_name,
+            ump_RF_id, ump_RF_name,
+        }
+    }
+}
+
+// Overwrite default serde_xml behaviour to throw an error when trying to parse an empty
+// string to a u32. Instead we return None, which makes a lot more sense
 fn empty_string_is_none<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error> 
     where D: Deserializer<'de>,
 {
@@ -413,7 +444,7 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     let players_url = format!("{}players.xml", url);
 
     let linescore_xml = reqwest::get(&linescore_url)?.text()?.replace('&', "&amp;");
-    let linescore = serde_xml_rs::from_str(&linescore_xml)?;
+    let linescore_data = serde_xml_rs::from_str(&linescore_xml)?;
 
     let boxscore_xml = reqwest::get(&boxscore_url)?.text()?;
     
@@ -421,18 +452,16 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
 
     let (weather_temp, weather_condition) = parse_weather(items[0])?;
     let (wind_speed, wind_direction) = parse_weather(items[1])?;
-
     let attendance: Option<u32> = if items.len() > 2 {parse_attendance(items[2])?} else {None};
 
     let players_xml = reqwest::get(&players_url)?.text()?;
-
     let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
 
-    let game_umps = umpire_pivot(player_data.umpires.umpires);
-       
-    let boxscore = BoxScoreData {weather_temp, weather_condition, wind_speed, wind_direction, attendance};
+    let game_umps: GameUmpires = player_data.umpires.into();
+    
+    let boxscore_data = BoxScoreData {weather_temp, weather_condition, wind_speed, wind_direction, attendance};
 
-    let game_data = GameData::new(boxscore, linescore);
+    let game_data = GameData::new(boxscore_data, linescore_data);
 
     Ok(game_data)
 }
