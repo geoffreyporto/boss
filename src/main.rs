@@ -99,6 +99,7 @@ struct Umpire {
     id: Option<u32>,
 }
 
+
 // This Struct is a waste, but is neccesary to get serde_xml_rs to work
 // A from/into impl is provided to transform it into the format we need
 #[derive(Deserialize, Serialize, Debug)]
@@ -149,6 +150,24 @@ struct LineScoreData {
     away_team_city: String,
     away_team_name: String,
     away_league_id: u32,
+    #[serde(rename="linescore", skip_serializing)]
+    innings: Vec<LineScore>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct LineScore {
+    #[serde(rename="away_inning_runs")]
+    away_runs: u32,
+    #[serde(rename="home_inning_runs")]
+    home_runs: u32,
+    // Keeping the inning as a string, since we'll need it to construct URLs later
+    inning: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct LineScores {
+    #[serde(rename="linescore")]
+    linescores: Vec<LineScore>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -302,14 +321,14 @@ impl From<num::ParseIntError> for GameDayError {
 
 // Converts the Umpires struct into the GameUmpires struct
 // We need to pivot the umpires into defined fields, to flatten it out for our game metadata
-
+// The From impl automatically provides an Into, which allows for a very readable .into()
 #[allow(non_snake_case)]
 impl From<Umpires> for GameUmpires {
     fn from(umpires: Umpires) -> GameUmpires {
         let umps: HashMap<String, (Option<u32>, String)> = umpires.umpires
             .into_iter()
             .map(|ump| (ump.position,(ump.id, ump.name)))
-            .collect::<HashMap<_,_>>();
+            .collect();
 
         let default = (None, String::new());
 
@@ -435,6 +454,20 @@ fn parse_attendance (att: &str) -> Result<Option<u32>, num::ParseIntError> {
     Ok( Some (attendance))
 }
 
+fn create_inning_links (base: &str, innings: &Vec<LineScore>) -> Vec<String> {
+
+    innings
+        .iter()
+        .map(|i| base.to_string() + "inning/inning_" + &i.inning + ".xml")
+        .collect()
+}
+
+fn parse_inning (url: &str) -> Option<u32> {
+
+    None
+
+}
+
 /// Takes in a base url for each game, downloads all the relevant xml files and parses them
 /// 
 /// The linescore.xml file contains imporant metadata about the game, such as venue and date
@@ -454,7 +487,10 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     let players_url = format!("{}players.xml", url);
 
     let linescore_xml = reqwest::get(&linescore_url)?.text()?.replace('&', "&amp;");
-    let linescore_data = serde_xml_rs::from_str(&linescore_xml)?;
+    let linescore_data: LineScoreData = serde_xml_rs::from_str(&linescore_xml)?;
+
+    let inning_links = create_inning_links(url, &linescore_data.innings);
+    dbg!(inning_links);
 
     let boxscore_xml = reqwest::get(&boxscore_url)?.text()?;
     
@@ -553,7 +589,9 @@ fn main () {
     let url = game_day_url("mlb", "2008", "06", "10");
     let games = game_day_links(&url).unwrap();
 
-    dbg!(game_download_parse(&games[0]));
+    game_download_parse(&games[0]);
+
+    // dbg!(game_download_parse(&games[0]));
 
 
 }
