@@ -131,7 +131,6 @@ struct GameUmpires {
     ump_RF_name: String,
 }
 
-
 #[derive(Deserialize, Serialize, Debug)]
 struct LineScoreData {
     game_pk: u32,
@@ -228,18 +227,12 @@ impl error::Error for GameDayMissingLinksError {
     }
 }
 
-// Would love to get rid of all the "skip_deserializing" notations, but it seems to be the only way to fix the compiler error?
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 enum GameDayError {
-    #[serde(skip_deserializing)]
     Request(reqwest::Error),
-    #[serde(skip_deserializing)]
     XMLParse(serde_xml_rs::Error),
-    #[serde(skip_deserializing)]
     ParseIntError(num::ParseIntError),
-    #[serde(skip_deserializing)]
     Weather(WeatherMissingError),
-    #[serde(skip_deserializing)]
     GameDayLinks(GameDayMissingLinksError),        
 }
 
