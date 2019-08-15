@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "baseball"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "csv 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "rayon 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
