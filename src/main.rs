@@ -48,6 +48,7 @@ pub const LEVELS:Levels = Levels {
     class: LEVEL_CLASS,
 };
 
+type GameDayLinks =  Vec<String>;
 
 #[derive(Deserialize, Serialize, Debug)]
 enum HomeAway {
@@ -98,6 +99,8 @@ struct Umpire {
     id: Option<u32>,
 }
 
+// This Struct is a waste, but is neccesary to get serde_xml_rs to work
+// A from/into impl is provided to transform it into the format we need
 #[derive(Deserialize, Serialize, Debug)]
 struct Umpires {
     #[serde(rename="umpire")]
@@ -178,6 +181,11 @@ struct WeatherMissingError {
     err_msg: String,
 }
 
+#[derive(Debug)]
+struct GameDayMissingLinksError {
+    err_msg: String,
+}
+
 impl fmt::Display for WeatherMissingError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Missing Weather Data for: {}", self.err_msg.to_owned())
@@ -198,6 +206,27 @@ impl error::Error for WeatherMissingError {
     }
 }
 
+impl fmt::Display for GameDayMissingLinksError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "No Valid GameDay Links found for: {}", self.err_msg.to_owned())
+    }
+}
+
+impl GameDayMissingLinksError {
+    fn error(msg: &str) -> Self {
+        GameDayMissingLinksError {
+            err_msg: msg.to_string()
+        }
+    }
+}
+
+impl error::Error for GameDayMissingLinksError {
+    fn description(&self) -> &str {
+        &self.err_msg
+    }
+}
+
+// Would love to get rid of all the "skip_deserializing" notations, but it seems to be the only way to fix the compiler error?
 #[derive(Debug, Deserialize)]
 enum GameDayError {
     #[serde(skip_deserializing)]
@@ -207,7 +236,9 @@ enum GameDayError {
     #[serde(skip_deserializing)]
     ParseIntError(num::ParseIntError),
     #[serde(skip_deserializing)]
-    Weather(WeatherMissingError),    
+    Weather(WeatherMissingError),
+    #[serde(skip_deserializing)]
+    GameDayLinks(GameDayMissingLinksError),        
 }
 
 impl fmt::Display for GameDayError {
@@ -217,6 +248,7 @@ impl fmt::Display for GameDayError {
             GameDayError::XMLParse(ref err) => write!(f, "XML Parse Error: {}", err),
             GameDayError::Weather(ref err) => write!(f, "Weather Error: {}", err),
             GameDayError::ParseIntError(ref err) => write!(f, "Interger Parse Error: {}", err),
+            GameDayError::GameDayLinks(ref err) => write!(f, "Missing GameDay Links Error: {}", err),
         }
     }
 }
@@ -228,6 +260,7 @@ impl error::Error for GameDayError {
             GameDayError::XMLParse(ref err) => err.description(),
             GameDayError::Weather(ref err) => err.description(),
             GameDayError::ParseIntError(ref err) => err.description(),
+            GameDayError::GameDayLinks(ref err) => err.description(),
         }
     }
     fn cause(&self) -> Option<&error::Error> {
@@ -236,6 +269,7 @@ impl error::Error for GameDayError {
             GameDayError::XMLParse(ref err) => Some(err),
             GameDayError::Weather(ref err) => Some(err),
             GameDayError::ParseIntError(ref err) => Some(err),
+            GameDayError::GameDayLinks(ref err) => Some(err),
         }
     }
 }
@@ -256,6 +290,12 @@ impl From<serde_xml_rs::Error> for GameDayError {
 impl From<WeatherMissingError> for GameDayError {
     fn from(err: WeatherMissingError) -> GameDayError {
         GameDayError::Weather(err)
+    }
+}
+
+impl From<GameDayMissingLinksError> for GameDayError {
+    fn from(err: GameDayMissingLinksError) -> GameDayError {
+        GameDayError::GameDayLinks(err)
     }
 }
 
@@ -319,22 +359,25 @@ fn game_day_url (level: &str, year: &str, month: &str, day: &str) -> String {
                     + "/day_" + day
 }
 
-fn game_day_links (url: &str) -> Vec<String> {
+// TODO - Rewrite this at some point to make it more idiomatic
+// Originally wanted to return an empty Vec when there were no links, but would rather
+// this return a custom error "No Games Found" rather than an empty Vec which is ambiguous, as it could be an unwrap issue,
+// or a parsing issue
 
-    let resp = reqwest::get(url);
+fn game_day_links (url: &str) -> Result<GameDayLinks, GameDayError> {
 
-    if resp.is_ok() {
-        let links = resp.unwrap().text().unwrap_or("".to_string());
-        links.split("<li>")
-            .filter(|line| line.contains("gid_"))
-            .map(|line| url.to_string().clone() + "/" 
-                + line.split(|c| c == '>'|| c == '<').nth(2).unwrap().trim()
-            )
-        .collect::<Vec<String>>()
-    }
-    else {
-        vec![]
-    }
+    let response = reqwest::get(url)?.text()?;
+
+    let links = response
+        .split("<li>")
+        .filter(|line| line.contains("gid_"))
+        .map(|line| url.to_string().clone() + "/" 
+            + line.split(|c| c == '>'|| c == '<').nth(2).unwrap().trim()
+        )
+        .collect()
+        ;
+
+    Ok(links)
 }
 
 
@@ -352,34 +395,6 @@ fn players_parse (url: &str) -> (Option<Game>) {
         None
     }
     
-}
-
-#[allow(non_snake_case)]
-fn umpire_pivot (umpires: Vec<Umpire>) -> GameUmpires {
-
-    let umps: HashMap<String, (Option<u32>, String)> = umpires
-        .into_iter()
-        .map(|ump| (ump.position,(ump.id, ump.name)))
-        .collect::<HashMap<_,_>>();
-
-    let default = (None, String::new());
-
-    let (ump_HP_id, ump_HP_name) = umps.get("home").unwrap_or(&default).to_owned();
-    let (ump_1B_id, ump_1B_name) = umps.get("first").unwrap_or(&default).to_owned();
-    let (ump_2B_id, ump_2B_name) = umps.get("second").unwrap_or(&default).to_owned();
-    let (ump_3B_id, ump_3B_name) = umps.get("third").unwrap_or(&default).to_owned();
-    let (ump_LF_id, ump_LF_name) = umps.get("left").unwrap_or(&default).to_owned();
-    let (ump_RF_id, ump_RF_name) = umps.get("right").unwrap_or(&default).to_owned();
-
-    GameUmpires {
-        ump_HP_id, ump_HP_name,
-        ump_1B_id, ump_1B_name,
-        ump_2B_id, ump_2B_name,
-        ump_3B_id, ump_3B_name,
-        ump_LF_id, ump_LF_name,
-        ump_RF_id, ump_RF_name,
-    }
-
 }
 
 fn split_boxscore_xml (xml: &str) -> Result<Vec<&str>, WeatherMissingError> {
@@ -543,7 +558,7 @@ fn main () {
     let url = game_day_url("mlb", "2008", "06", "10");
     let games = game_day_links(&url);
 
-    let players = games.par_iter()
+    let players = games.unwrap().par_iter()
                     .map(|game| game.to_string() + "players.xml")
                     .filter_map(|url| players_parse(&url))
                     .collect::<Vec<_>>();
