@@ -180,6 +180,103 @@ struct BoxScoreData {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
+struct PlateAppearance {
+    #[serde(rename="num")]
+    at_bat_num: u16,
+    batter: u32,
+    #[serde(rename="stand")]
+    batter_stands: char,
+    pitcher: u32,
+    #[serde(rename="p_throws")]
+    pitcher_throws: char,
+    #[serde(rename="des")]
+    at_bat_des: String,
+    #[serde(skip_deserializing)]
+    outs_start: u8,
+    #[serde(rename="o")]
+    outs_end: u8,
+    #[serde(rename="event")]
+    at_bat_result: String,
+    #[serde(rename="pitch")]
+    pitches: Vec<Pitch>,
+    #[serde(rename="runner")]
+    runners: Vec<Runner>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Inning {
+    
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Action {
+    #[serde(rename="b")]
+    balls: u8,
+    #[serde(rename="s")]
+    strikes: u8,
+    #[serde(rename="o")]
+    outs: u8,
+    #[serde(rename="des")]
+    action_description: String,
+    player: u32,
+    pitch: u8,
+    event: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Pitch {
+    des: String,
+    #[serde(rename="type")]
+    pitch_result: char,
+    #[serde(rename="x")]
+    pixels_x: f32,
+    #[serde(rename="y")]
+    pixels_y: f32,
+
+    // The fields below are the MLB specific fields and will all be wrapped in Options
+    ax: Option<f32>,
+    ay: Option<f32>,
+    az: Option<f32>,
+    vx_0: Option<f32>,
+    vy_0: Option<f32>,
+    vz_0: Option<f32>,
+    x_0: Option<f32>,
+    y_0: Option<f32>,
+    z_0: Option<f32>,
+
+    #[serde(rename="px")]
+    plate_x: Option<f32>,
+    #[serde(rename="pz")]
+    plate_z: Option<f32>,
+
+    break_angle: Option<f32>,
+    break_length: Option<f32>,
+    break_y: Option<f32>,
+    
+    #[serde(rename="code")]
+    pitch_code: Option<char>,
+    #[serde(rename="des")]
+    pitch_description: Option<String>,
+    #[serde(rename="start_speed")]
+    pitch_speed_start: Option<f32>,
+    #[serde(rename="end_speed")]
+    pitch_speed_end: Option<f32>,
+    pitch_type: Option<String>
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Runner {
+
+    code: Option<char>,
+    id: u32,
+    start: String,
+    end: String,
+    event: String,
+}
+
+
+
+#[derive(Deserialize, Serialize, Debug)]
 struct GameData {
     linescore_data: LineScoreData,
     boxscore_data: BoxScoreData,
@@ -277,7 +374,7 @@ impl error::Error for GameDayError {
             GameDayError::GameDayLinks(ref err) => err.description(),
         }
     }
-    fn cause(&self) -> Option<&error::Error> {
+    fn cause(&self) -> Option<&dyn error::Error> {
         match *self {
             GameDayError::Request(ref err) => Some(err),
             GameDayError::XMLParse(ref err) => Some(err),
@@ -462,6 +559,8 @@ fn create_inning_links (base: &str, innings: &Vec<LineScore>) -> Vec<String> {
         .collect()
 }
 
+
+// TODO - create the struct first
 fn parse_inning (url: &str) -> Option<u32> {
 
     None
@@ -490,7 +589,7 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     let linescore_data: LineScoreData = serde_xml_rs::from_str(&linescore_xml)?;
 
     let inning_links = create_inning_links(url, &linescore_data.innings);
-    dbg!(inning_links);
+    // dbg!(inning_links);
 
     let boxscore_xml = reqwest::get(&boxscore_url)?.text()?;
     
@@ -589,7 +688,13 @@ fn main () {
     let url = game_day_url("mlb", "2008", "06", "10");
     let games = game_day_links(&url).unwrap();
 
-    game_download_parse(&games[0]);
+    // game_download_parse(&games[0]);
+
+    let at_bat_xml = r#"<atbat num="77" b="0" s="0" o="1" batter="544881" stand="R" b_height="6-0" pitcher="501640" p_throws="R" des="Donell Linares doubles (4) on a line drive to left fielder Guillermo Pimentel.    Erick Epifano to 3rd.  " event="Double"><pitch des="In play, no out" id="446" type="X" x="97.85" y="120.88" on_1b="542573"/><runner id="542573" start="1B" end="3B" event="Double"/><runner id="544881" start="" end="2B" event="Double"/></atbat>"#;
+
+    let at_bat: PlateAppearance = serde_xml_rs::from_str(at_bat_xml).unwrap();
+
+    dbg!(at_bat);
 
     // dbg!(game_download_parse(&games[0]));
 
