@@ -17,6 +17,7 @@ baseball = "0.1"
 ### Prior Art
 
 [baseballr](https://github.com/BillPetti/baseballr) by Bill Petti
+[pitchrx](https://github.com/cpsievert/pitchRx) by Carson Sievert
 
 ### Motivation
 

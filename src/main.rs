@@ -8,6 +8,8 @@ use rayon::prelude::*;
 use serde::{Serialize, Deserialize, Deserializer};
 use std::{error, fmt, num};
 use std::collections::HashMap;
+use std::time;
+mod draft;
 
 // use csv::Writer;
 
@@ -70,7 +72,7 @@ struct Team {
     coaches: Vec<Coach>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct Player {
     id: u32,
     #[serde(rename="first")]
@@ -78,7 +80,10 @@ struct Player {
     #[serde(rename="last")]
     name_last: String,
     game_position: Option<String>,
-    bat_order: Option<String>,
+    bat_order: Option<u8>,
+    team_id: u32,
+    team_abbrev: String,
+    position: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -158,8 +163,9 @@ struct LineScoreData {
 struct LineScore {
     #[serde(rename="away_inning_runs")]
     away_runs: u32,
-    #[serde(rename="home_inning_runs")]
-    home_runs: u32,
+    #[serde(rename="home_inning_runs", deserialize_with = "empty_string_is_none")]
+    //needs to be an Option, since home team doesn't always bat.
+    home_runs: Option<u32>,
     // Keeping the inning as a string, since we'll need it to construct URLs later
     inning: String,
 }
@@ -188,11 +194,9 @@ struct PlateAppearance {
     batter_stands: char,
     pitcher: u32,
     #[serde(rename="p_throws")]
-    pitcher_throws: char,
+    pitcher_throws: Option<char>,
     #[serde(rename="des")]
     plate_app_des: String,
-    // #[serde(skip_deserializing)]
-    // outs_start: u8,
     #[serde(rename="o")]
     outs_end: u8,
     #[serde(rename="event")]
@@ -204,7 +208,7 @@ struct PlateAppearance {
 #[derive(Deserialize, Serialize, Debug)]
 struct Inning {
     top: HalfInning,
-    bottom: HalfInning,
+    bottom: Option<HalfInning>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -251,6 +255,40 @@ struct PickOff {
     des: String,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct PlateAppearanceState {
+    balls_start: u8,
+    balls_end: u8,
+    strikes_start: u8,
+    strikes_end: u8,
+    outs_start: u8,
+    outs_end: u8,
+    runs_scored: u8,
+    base_state_start: u8,
+    base_state_end: u8,
+    re_24_start: f32,
+    re_24_end: f32,
+    re_288_start: f32,
+    re_288_end: f32,
+    batter_responsible: bool,
+}
+
+impl Default for PlateAppearanceState {
+    fn default() -> Self {
+        PlateAppearanceState {
+            balls_start: 0, balls_end: 0,
+            strikes_start: 0, strikes_end: 0,
+            outs_start: 0, outs_end: 0,
+            runs_scored: 0,
+            base_state_start: 0, base_state_end: 0,
+            re_24_start: 0.0, re_24_end: 0.0,
+            re_288_start: 0.0, re_288_end: 0.0,
+            batter_responsible: true,
+        }
+    }
+}
+
+
 #[derive(Deserialize, Serialize, Debug)]
 struct Pitch {
     des: String,
@@ -265,12 +303,12 @@ struct Pitch {
     ax: Option<f32>,
     ay: Option<f32>,
     az: Option<f32>,
-    vx_0: Option<f32>,
-    vy_0: Option<f32>,
-    vz_0: Option<f32>,
-    x_0: Option<f32>,
-    y_0: Option<f32>,
-    z_0: Option<f32>,
+    vx0: Option<f32>,
+    vy0: Option<f32>,
+    vz0: Option<f32>,
+    x0: Option<f32>,
+    y0: Option<f32>,
+    z0: Option<f32>,
 
     #[serde(rename="px")]
     plate_x: Option<f32>,
@@ -292,33 +330,33 @@ struct Pitch {
     pitch_type: Option<String>,
 
     #[serde(skip_deserializing)]
-    balls_start: u8,
+    plate_appearance_state: PlateAppearanceState,
     #[serde(skip_deserializing)]
-    balls_end: u8,
+    plate_appearance_pitch_num: usize,
     #[serde(skip_deserializing)]
-    strikes_start: u8,
+    plate_appearance_num: u16,
     #[serde(skip_deserializing)]
-    strikes_end: u8,
+    batter: u32,
     #[serde(skip_deserializing)]
-    outs_start: u8,
+    pitcher: u32,
     #[serde(skip_deserializing)]
-    outs_end: u8,
+    batter_stands: char,
     #[serde(skip_deserializing)]
-    runs_start: u8,
+    pitcher_throws: Option<char>,
     #[serde(skip_deserializing)]
-    runs_end: u8,
+    plate_appearance_des: String,
     #[serde(skip_deserializing)]
-    base_state_start: u8,
+    plate_appearance_result: String,
+
     #[serde(skip_deserializing)]
-    base_state_end: u8,
+    batter_bat_order: Option<u8>,
     #[serde(skip_deserializing)]
-    re_24_start: f32,
+    batter_game_position: Option<String>,
     #[serde(skip_deserializing)]
-    re_24_end: f32,
+    pitcher_sp_rp: SPRP,
+
     #[serde(skip_deserializing)]
-    re_288_start: f32,
-    #[serde(skip_deserializing)]
-    re_288_end: f32,
+    swing: u8,
 
     #[serde(skip_deserializing)]
     in_play_pixels_x: Option<f32>,
@@ -332,12 +370,25 @@ struct Pitch {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
+enum SPRP {
+    SP,
+    RP,
+}
+
+impl Default for SPRP {
+    fn default() -> Self {
+        SPRP::RP
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 struct Runner {
     code: Option<char>,
     id: u32,
     start: String,
     end: String,
     event: String,
+    score: Option<char>,
 }
 
 
@@ -346,14 +397,21 @@ struct GameData {
     linescore_data: LineScoreData,
     boxscore_data: BoxScoreData,
     game_umps: GameUmpires,
+    pitches: Vec<Pitch>,
 }
 
 impl GameData {
-    fn new(boxscore_data: BoxScoreData, linescore_data: LineScoreData, game_umps: GameUmpires) -> Self {
+    fn new(
+        boxscore_data: BoxScoreData, 
+        linescore_data: LineScoreData, 
+        game_umps: GameUmpires, 
+        pitches: Vec<Pitch>,
+        ) -> Self {
         GameData {
             boxscore_data,
             linescore_data,
             game_umps,
+            pitches,
         }
     }
 }
@@ -412,6 +470,7 @@ impl error::Error for GameDayMissingLinksError {
 enum GameDayError {
     Request(isahc::Error),
     XMLParse(serde_xml_rs::Error),
+    JSONParse(serde_json::Error),
     ParseIntError(num::ParseIntError),
     Weather(WeatherMissingError),
     GameDayLinks(GameDayMissingLinksError),        
@@ -422,6 +481,7 @@ impl fmt::Display for GameDayError {
         match *self {
             GameDayError::Request(ref err) => write!(f, "Network Error: {}", err),
             GameDayError::XMLParse(ref err) => write!(f, "XML Parse Error: {}", err),
+            GameDayError::JSONParse(ref err) => write!(f, "JSON Parse Error: {}", err),
             GameDayError::Weather(ref err) => write!(f, "Weather Error: {}", err),
             GameDayError::ParseIntError(ref err) => write!(f, "Interger Parse Error: {}", err),
             GameDayError::GameDayLinks(ref err) => write!(f, "Missing GameDay Links Error: {}", err),
@@ -434,6 +494,7 @@ impl error::Error for GameDayError {
         match *self {
             GameDayError::Request(ref err) => err.description(),
             GameDayError::XMLParse(ref err) => err.description(),
+            GameDayError::JSONParse(ref err) => err.description(),
             GameDayError::Weather(ref err) => err.description(),
             GameDayError::ParseIntError(ref err) => err.description(),
             GameDayError::GameDayLinks(ref err) => err.description(),
@@ -443,6 +504,7 @@ impl error::Error for GameDayError {
         match *self {
             GameDayError::Request(ref err) => Some(err),
             GameDayError::XMLParse(ref err) => Some(err),
+            GameDayError::JSONParse(ref err) => Some(err),
             GameDayError::Weather(ref err) => Some(err),
             GameDayError::ParseIntError(ref err) => Some(err),
             GameDayError::GameDayLinks(ref err) => Some(err),
@@ -460,6 +522,12 @@ impl From<isahc::Error> for GameDayError {
 impl From<serde_xml_rs::Error> for GameDayError {
     fn from(err: serde_xml_rs::Error) -> GameDayError {
         GameDayError::XMLParse(err)
+    }
+}
+
+impl From<serde_json::Error> for GameDayError {
+    fn from(err: serde_json::Error) -> GameDayError {
+        GameDayError::JSONParse(err)
     }
 }
 
@@ -481,9 +549,9 @@ impl From<num::ParseIntError> for GameDayError {
     }
 }
 
-// Converts the Umpires struct into the GameUmpires struct
-// We need to pivot the umpires into defined fields, to flatten it out for our game metadata
-// The From impl automatically provides an Into, which allows for a very readable .into()
+/// Converts the Umpires struct into the GameUmpires struct
+/// We need to pivot the umpires into defined fields, to flatten it out for our game metadata
+/// The From impl automatically provides an Into, which allows for a very readable .into()
 #[allow(non_snake_case)]
 impl From<Umpires> for GameUmpires {
     fn from(umpires: Umpires) -> GameUmpires {
@@ -529,10 +597,9 @@ fn empty_string_is_none<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error
 
 fn game_day_url (level: &str, year: &str, month: &str, day: &str) -> String {
 
-    String::from("http://gd2.mlb.com/components/game/") + level 
-                    + "/year_" + year 
-                    + "/month_" + month 
-                    + "/day_" + day
+    let base_url = "http://gd2.mlb.com/components/game/";
+
+    [base_url, "mlb", "/year_", year, "/month_", month, "/day_", day].concat()       
 }
 
 // TODO - Rewrite this at some point to make it more idiomatic
@@ -608,16 +675,306 @@ fn create_inning_links (base: &str, innings: &Vec<LineScore>) -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
+fn inning_xml_parse (http_client: &HttpClient, inning_links: Vec<String>) -> Result<Vec<Inning>, GameDayError> {
 
-fn inning_xml_parse (inning_links: Vec<String>) -> Result<Vec<Inning>, GameDayError> {
-    let mut inning_data: Vec<Inning> = Vec::with_capacity(inning_links.len());
-    for inning_link in inning_links {
-        let inning_xml = isahc::get(inning_link)?.text()?;
-        inning_data.push(serde_xml_rs::from_str(&inning_xml)?);
-    }
-    Ok(inning_data)
+    inning_links.iter()
+        .map(|link| 
+            {
+                let inning_xml = http_client.get(link)?.text()?;
+                Ok(serde_xml_rs::from_str(&inning_xml)?)
+            })
+        .collect()
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct PlayerBio {
+    id: u32,
+    birth_date: String,
+    birth_city: String,
+    birth_country: String,
+    birth_state_province: Option<String>,
+    height: String,
+    #[serde(skip_deserializing)]
+    height_in: u32,
+    weight: u16,
+    weight_v2: Option<u16>,
+    full_name: String,
+    draft_year: Option<u16>,
+    mlb_debut_date: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PlayerXml {
+    weight: u16,
+}
+
+// We have game specific data as well as unchanging bio info
+#[derive(Serialize, Debug)]
+struct PlayerBioGame {
+    bio: PlayerBio,
+    game: Player,
+}
+
+//Decides wether to look in the batter or pitcher folder for the player xml
+
+
+fn get_player_data(http_client: &HttpClient, url: &str, player: Player) -> Result<PlayerBioGame, GameDayError> {
+
+    let url_json =  String::from("http://statsapi.mlb.com/api/v1/people/") + &player.id.to_string();
+
+    // We pull the primary data from the mlb API as it is more reliable. Eventually, we'll want to avoid doing this once
+    // per game and store a local version that will be checked first. For the first iteration, this simplifies the
+    // implementation considerably.
+    
+    let raw_json_data = &http_client.get(&url_json)?.text()?;
+
+    // This is an ugly way to just get at the "people" field, but it has less indirection so doing it this way for now        
+    let json_data = raw_json_data
+                .split (r#""people" : [ "#)
+                .nth(1).unwrap_or("")
+                .trim_end_matches("}")
+                .trim()
+                .trim_end_matches("]")
+                .trim()
+                ;
+
+    let mut player_bio: PlayerBio = serde_json::from_str(&json_data)?;
+
+    // We want to have our height measurable as an integral number suitable for input into models
+    // First, we split by the ' giving us a small vector of length 1 or 2. We enumerate this vector
+    // and then multiply the first element by 12^1 and the second element by 12^0. If we have a third
+    // element for some reason, this should be an error, but we're ignoring that case for now.
+    player_bio.height_in = player_bio.height
+                    .split('\'')
+                    .filter_map(|h| h.trim().parse().ok())
+                    .enumerate()
+                    .map(|(n, h): (usize, u32)| h * 12u32.pow(1-n as u32))
+                    .sum();   
+
+    // The GameDay xml has a weight field which holds some potentially interesting historical data. 
+    // The above API only shows the current player's weight, not how much he weighed 10 years ago.
+    // Seeing a player's weight gain curve could be interesting. These data are sometimes missing, so at
+    // some point we'll need to iterate through all those records and 
+    // 
+    // We don't want to propogate an error here, since we don't want this to fail when the file isn't available.player_json
+    // We'll just return none if there's an issue.
+
+    let url_xml = 
+        if player.position == "P" {
+            String::from(url) + "pitchers/" + &player.id.to_string() + ".xml"
+        }
+        else {
+            String::from(url) + "batters/" + &player.id.to_string() + ".xml"
+        };
+
+    let player_xml_text = match http_client.get(&url_xml) {
+        Ok(mut resp) => resp.text().unwrap(),
+        _ => "".to_string(),
+    };
+
+    let player_xml: Result<PlayerXml, serde_xml_rs::Error> = serde_xml_rs::from_str(&player_xml_text);
+
+    player_bio.weight_v2 = match player_xml {
+        Ok(player) => Some(player.weight),
+        _ => None,
+    };
+
+
+    Ok(PlayerBioGame {
+        bio: player_bio,
+        game: player,
+    })
 
 }
+
+fn process_base_state (base_state_start: u8, runner: Runner) -> (u8, u8, u8) {
+
+    // Base state converts the binary representation of the base runners into a number between 0-7.
+    // A runner on first is worth 2^0, second base, 2^1 and third base 2^2. We get each runner separately, so update the base state at each step and add up the number of runs scored.
+
+
+    let base_state_end = {
+        base_state_start 
+        - {
+            if runner.start == "1B".to_string() {1}
+            else if runner.start == "2B".to_string() {2}
+            else if runner.start == "3B".to_string() {4}
+            else {0}
+        }
+        + {
+            if runner.end == "1B".to_string() {1}
+            else if runner.end == "2B".to_string() {2}
+            else if runner.end == "3B".to_string() {4}
+            else {0}
+        }
+    };
+    
+    let runs = if runner.score == Some('T') {1} else {0};
+    let outs = if runner.end == "".to_string() && runner.score != Some('T') {1} else {0};
+
+    (base_state_end, runs, outs)
+}
+
+fn process_plate_appearance (plate_appearance: PlateAppearance, base_state: u8, outs: u8) 
+-> (Vec<Pitch>, u8) {
+    let mut pitches: Vec<Pitch> = Vec::with_capacity(plate_appearance.pitch_or_runner.len());
+    
+    let mut pitch_num = 0;
+    let mut balls: u8 = 0;
+    let mut strikes: u8 = 0;
+
+    let mut base_state = base_state;
+    let mut outs = outs;
+    // let mut plate_appearance_state = PlateAppearanceState::default();
+
+    // We loop through all the pitch or runner events. If we find a pitch, we push it to our vector.
+    // If we find a runner field, we update our base state
+    for pitch_or_runner in plate_appearance.pitch_or_runner {
+
+        match pitch_or_runner {
+            PitchOrRunner::PickOff(pickoff) => {
+
+            },
+            PitchOrRunner::Runner(runner) => {
+                // The Runner data will update values relative to the previous pitch
+                let event = runner.event.to_lowercase();
+
+                // If there is a stolen base attempt, or pick off attempt we want to make sure we don't credit/debit the batter for the changed base/out state
+                if event.contains("stolen") 
+                    || event.contains("stealing") 
+                    || event.contains("pickoff") 
+                    || event.contains("picked off")
+                    {pitches[pitch_num-1].plate_appearance_state.batter_responsible = false}
+                else {pitches[pitch_num-1].plate_appearance_state.batter_responsible = true};
+                
+                let (end, runs, outs) = process_base_state(base_state, runner);
+                if pitch_num > 0 {
+                    pitches[pitch_num-1].plate_appearance_state.base_state_end = end;
+                    pitches[pitch_num-1].plate_appearance_state.outs_end = end;
+                    pitches[pitch_num-1].plate_appearance_state.runs_scored += runs;
+                }
+
+                base_state = end;        
+
+                //TODO Add a check here to make sure our runner state is consistent
+
+
+            },
+            PitchOrRunner::Pitch(pitch) => {
+                let mut pitch = pitch;
+                pitch.plate_appearance_state.base_state_start = base_state;
+                pitch.plate_appearance_state.base_state_end = base_state;
+                pitch.plate_appearance_state.balls_start = balls;
+                pitch.plate_appearance_state.strikes_start = strikes;
+                pitch.plate_appearance_state.outs_start = outs;
+
+                match pitch.pitch_result {
+                    'B' => {balls += 1}
+                    'S' => {
+                        if pitch.des != "Foul" &&
+                            pitch.des != "Foul (Runner Going)" &&
+                            pitch.des != "Foul Pitchout" {
+                                strikes +=1;
+                            }
+                        }
+                    _ => {}
+                }
+                pitch.plate_appearance_state.balls_end = balls;
+                pitch.plate_appearance_state.strikes_end = strikes;
+                pitch.batter = plate_appearance.batter;
+                pitch.batter_stands = plate_appearance.batter_stands;
+                pitch.pitcher = plate_appearance.pitcher;
+                pitch.pitcher_throws = plate_appearance.pitcher_throws;
+                pitch.plate_appearance_num = plate_appearance.at_bat_num;
+                pitch.plate_appearance_des = plate_appearance.plate_app_des.clone();
+                pitch.plate_appearance_result = plate_appearance.plate_app_result.clone();
+
+
+                //Determine if there was a swing or take
+
+                if pitch.des.starts_with("In play")
+                    || pitch.des.starts_with("Foul")
+                    || pitch.des.starts_with("Swinging")
+                    || pitch.des.contains("Bunt")
+                    {pitch.swing = 1}
+                else {pitch.swing = 0};
+
+                pitch_num +=1;
+                pitch.plate_appearance_pitch_num = pitch_num;
+                pitches.push(pitch);
+
+
+
+            }
+        }
+
+    }
+
+    // This should be authomatically calculated by the runners, however in the chance that the data are corrupt 
+    // we force the last pitch of at_bat to reflect the plate appearance outs_end value
+    pitches[pitch_num-1].plate_appearance_state.outs_end = plate_appearance.outs_end;
+
+    // There is a bug in the data where if there is a pickoff attempt early in count, a base hit runner event
+    // could be logged in as a "pickoff attempt". If the last pitch of the atbat was put in play, we'll override the
+    // responsibility here
+    if pitches[pitch_num-1].pitch_result == 'X' {
+        pitches[pitch_num-1].plate_appearance_state.batter_responsible = true
+    }
+
+    (pitches, base_state)
+
+}
+
+
+//for the first iteration, we'll ignore all actions
+fn process_half_inning (half_inning: HalfInning) -> Vec<Pitch> {
+    //We're going to pre-size each half inning vec for 30 pitches, which should be good for most innings and minimize re-sizing
+    let mut pitches: Vec<Pitch> = Vec::with_capacity(30);
+    let mut base_state: u8 = 0;
+    let mut outs: u8 = 0;
+    
+    for at_bat_or_action in half_inning.at_bat_action {
+
+        match at_bat_or_action {
+            AtBatOrAction::Action (action) => {},
+            AtBatOrAction::PlateAppearance (plate_appearance) => {
+                let outs_end = plate_appearance.outs_end;
+                let (pitches_from_pa, base_state_update) = process_plate_appearance(plate_appearance, base_state, outs);
+                pitches.extend(pitches_from_pa);
+                base_state = base_state_update;
+                outs = outs_end;
+            },
+        };
+    }
+
+    pitches
+}
+
+
+//TODO - Refactor this code to capture potential errors in the data and switch this to a Result type
+fn process_inning_data (inning_data: Vec<Inning>, players: HashMap<u32, PlayerBioGame>) -> Vec<Pitch> {
+
+    let mut pitches: Vec<Pitch> = Vec::new();
+
+
+    //loop through each inning
+    for inning in inning_data {
+
+        let top = inning.top;
+        let bottom = inning.bottom;
+
+        pitches.extend(process_half_inning(top));
+        if let Some(bottom) = bottom {pitches.extend(process_half_inning(bottom))};
+
+    }
+
+
+    pitches
+
+}
+
+
 
 
 /// Takes in a base url for each game, downloads all the relevant xml files and parses them
@@ -632,24 +989,27 @@ fn inning_xml_parse (inning_links: Vec<String>) -> Result<Vec<Inning>, GameDayEr
 /// 
 /// 
 
-fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
+fn game_download_parse (http_client: &HttpClient, url: &str) -> Result <GameData, GameDayError> {
 
     let linescore_url = format!("{}linescore.xml", url);
     let boxscore_url = format!("{}boxscore.xml", url);
     let players_url = format!("{}players.xml", url);
 
-    let linescore_xml = isahc::get(&linescore_url)?.text()?.replace('&', "&amp;");
+    // dbg!(&linescore_url);
+
+    let linescore_xml = http_client.get(&linescore_url)?.text()?.replace('&', "&amp;");
     let linescore_data: LineScoreData = serde_xml_rs::from_str(&linescore_xml)?;
+
+    // dbg!(&linescore_data);
 
     let inning_links = create_inning_links(url, &linescore_data.innings);
     let inning_hit_link = url.to_string() + "inning/inning_hit.xml";
-    // dbg!(inning_links);
+    
+    let inning_data = inning_xml_parse(http_client, inning_links)?;
 
-    let inning_data = inning_xml_parse(inning_links)?;
+    // dbg!(&inning_data[0]);
 
-    dbg!(&inning_data[0]);
-
-    let boxscore_xml = isahc::get(&boxscore_url)?.text()?;
+    let boxscore_xml = http_client.get(&boxscore_url)?.text()?;
     
     let items = split_boxscore_xml(&boxscore_xml)?;
 
@@ -657,39 +1017,84 @@ fn game_download_parse (url: &str) -> Result <GameData, GameDayError> {
     let (wind_speed, wind_direction) = parse_weather(items[1])?;
     let attendance: Option<u32> = if items.len() > 2 {parse_attendance(items[2])?} else {None};
 
-    let players_xml = isahc::get(&players_url)?.text()?;
+    let players_xml = http_client.get(&players_url)?.text()?;
     let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
+
+
+    let players: HashMap <u32, PlayerBioGame> = player_data.teams.iter()
+                        .map(|team| team.players.clone())
+                        .flatten()
+                        .filter_map(|player| get_player_data(http_client, url, player).ok())
+                        .map(|player| (player.game.id, player))
+                        .collect();
+
+    dbg!(&players);
 
     let game_umps: GameUmpires = player_data.umpires.into();
     
     let boxscore_data = BoxScoreData {weather_temp, weather_condition, wind_speed, wind_direction, attendance};
 
-    let game_data = GameData::new(boxscore_data, linescore_data, game_umps);
+    let pitches = process_inning_data(inning_data, players);
+
+    let game_data = GameData::new(boxscore_data, linescore_data, game_umps, pitches);
 
     Ok(game_data)
 }
 
 fn main () {
 
-    let url = game_day_url("mlb", "2008", "06", "10");
-    let games = game_day_links(&url).unwrap();
+    let gd_client = HttpClient::new().unwrap();
 
-    dbg!(game_download_parse(&games[0]));
+    let days = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10",
+                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                    "21", "22", "23", "24", "25", "26", "27", "28", "29", "30",
+                    "31",
+                    ];
 
-    // let at_bat_xml = r#"<atbat num="77" b="0" s="0" o="1" batter="544881" stand="R" b_height="6-0" pitcher="501640" p_throws="R" des="Donell Linares doubles (4) on a line drive to left fielder Guillermo Pimentel.    Erick Epifano to 3rd.  " event="Double"><pitch des="In play, no out" id="446" type="X" x="97.85" y="120.88" on_1b="542573"/><runner id="542573" start="1B" end="3B" event="Double"/><runner id="544881" start="" end="2B" event="Double"/></atbat>"#;
 
-    let at_bat_xml = r#"<atbat num="4" b="1" s="0" o="3" batter="544881" stand="R" b_height="6-0" pitcher="542653" p_throws="R" des="Donell Linares flies out to center fielder Ariel Ventura.  " event="Fly Out"><pitch des="Ball" id="18" type="B" x="56.65" y="127.79" on_1b="501592"/><runner id="501592" start="1B" end="2B" event="Stolen Base 2B"/><pitch des="In play, out(s)" id="22" type="X" x="105.58" y="139.02" on_2b="501592"/><runner id="501592" start="2B" end="" event="Fly Out"/></atbat>"#;
-    let at_bat: PlateAppearance = serde_xml_rs::from_str(&at_bat_xml).unwrap();
-    // dbg!(at_bat);
+    let months = ["03", "04", "05", "06", "07", "08", "09", "10"];
 
-    let inning_xml = r#"<inning away_team="bos" home_team="cle" next="Y" num="9"><top><action away_team_runs="6" b="0" des="Mike Freeman remains in the game as the designated hitter." des_es="Mike Freeman remains in the game as the designated hitter." event="Defensive Switch" event_es="Defensive Switch" event_num="1" home_team_runs="5" o="0" pitch="1" player="502273" s="0" tfs="022314" tfs_zulu="2019-08-14T02:23:14.000Z"/><action away_team_runs="6" b="0" des="Pitching Change: Tyler Clippard replaces Adam Cimber." des_es="Pitching Change: Tyler Clippard replaces Adam Cimber." event="Pitching Substitution" event_es="Pitching Substitution" event_num="2" home_team_runs="5" o="0" pitch="1" player="461325" s="0" tfs="022314" tfs_zulu="2019-08-14T02:23:14.000Z"/><atbat away_team_runs="6" b="3" b_height="5' 10" batter="643217" des="Andrew Benintendi flies out to right fielder Tyler Naquin." des_es="Andrew Benintendi flies out to right fielder Tyler Naquin." end_tfs_zulu="2019-08-14T02:27:56.000Z" event="Flyout" event_es="Flyout" event_num="3" home_team_runs="5" num="75" o="1" p_throws="R" pitcher="461325" play_guid="132f8425-90a2-4282-aef9-255a9832da79" s="2" stand="L" start_tfs="022314" start_tfs_zulu="2019-08-14T02:23:14.000Z"><pitch ax="-13.41" ay="25.12" az="-17.72" break_angle="33.6" break_length="4.8" break_y="24.0" cc="" code="C" des="Called Strike" des_es="Pitching Change: Tyler Clippard replaces Adam Cimber." end_speed="83.6" event_num="4" id="4" mt="" nasty="" pfx_x="-7.54" pfx_z="8.13" pitch_type="FT" play_guid="a5338474-9b48-47b9-92ab-a3aa4481f8dd" px="-0.74" pz="2.69" spin_dir="placeholder" spin_rate="placeholder" start_speed="90.6" sv_id="190814_022454" sz_bot="1.55" sz_top="3.34" tfs="022450" tfs_zulu="2019-08-14T02:24:50.000Z" type="S" type_confidence="placeholder" vx0="5.89" vy0="-131.75" vz0="-4.64" x="145.05" x0="-2.01" y="166.18" y0="50.0" z0="5.76" zone="placeholder"/><pitch ax="-4.05" ay="20.84" az="-31.1" break_angle="7.2" break_length="9.6" break_y="24.0" cc="" code="B" des="Ball" des_es="Called Strike" end_speed="74.4" event_num="5" id="5" mt="" nasty="" pfx_x="-2.89" pfx_z="0.77" pitch_type="FS" play_guid="9c215ee7-c838-4915-9dde-5f608680e675" px="-1.0" pz="3.64" spin_dir="placeholder" spin_rate="placeholder" start_speed="80.6" sv_id="190814_022524" sz_bot="1.55" sz_top="3.36" tfs="022520" tfs_zulu="2019-08-14T02:25:20.000Z" type="B" type_confidence="placeholder" vx0="0.74" vy0="-117.32" vz0="0.45" x="154.97" x0="-0.94" y="140.49" y0="50.0" z0="6.32" zone="placeholder"/><pitch ax="-12.07" ay="18.17" az="-23.34" break_angle="24.0" break_length="7.2" break_y="24.0" cc="" code="B" des="Ball" des_es="Ball" end_speed="73.5" event_num="6" id="6" mt="" nasty="" pfx_x="-8.93" pfx_z="6.54" pitch_type="CH" play_guid="0bd2e759-ab83-49cc-afdf-3eb0f8fc7fa0" px="1.43" pz="1.48" spin_dir="placeholder" spin_rate="placeholder" start_speed="79.1" sv_id="190814_022545" sz_bot="1.56" sz_top="3.33" tfs="022540" tfs_zulu="2019-08-14T02:25:40.000Z" type="B" type_confidence="placeholder" vx0="11.21" vy0="-114.69" vz0="-3.84" x="62.54" x0="-2.33" y="198.79" y0="50.0" z0="5.41" zone="placeholder"/><pitch ax="-9.24" ay="17.95" az="-20.64" break_angle="21.6" break_length="7.2" break_y="24.0" cc="" code="F" des="Foul" des_es="Ball" end_speed="72.7" event_num="7" id="7" mt="" nasty="" pfx_x="-6.95" pfx_z="8.68" pitch_type="CH" play_guid="2bab689b-614b-47d2-8d0a-30d7058f8952" px="0.42" pz="2.26" spin_dir="placeholder" spin_rate="placeholder" start_speed="78.2" sv_id="190814_022607" sz_bot="1.58" sz_top="3.35" tfs="022559" tfs_zulu="2019-08-14T02:25:59.000Z" type="S" type_confidence="placeholder" vx0="7.02" vy0="-113.76" vz0="-3.7" x="101.04" x0="-1.78" y="177.85" y0="50.0" z0="5.91" zone="placeholder"/><pitch ax="-7.35" ay="24.28" az="-11.78" break_angle="25.2" break_length="3.6" break_y="24.0" cc="" code="F" des="Foul" des_es="Foul" end_speed="83.7" event_num="8" id="8" mt="" nasty="" pfx_x="-4.14" pfx_z="11.51" pitch_type="FF" play_guid="9283c803-909a-420f-997b-ea05b137062e" px="0.77" pz="2.19" spin_dir="placeholder" spin_rate="placeholder" start_speed="90.4" sv_id="190814_022632" sz_bot="1.58" sz_top="3.35" tfs="022626" tfs_zulu="2019-08-14T02:26:26.000Z" type="S" type_confidence="placeholder" vx0="6.33" vy0="-131.41" vz0="-7.32" x="87.61" x0="-1.12" y="179.81" y0="50.0" z0="5.85" zone="placeholder"/><pitch ax="-14.93" ay="25.72" az="-17.97" break_angle="36.0" break_length="4.8" break_y="24.0" cc="" code="F" des="Foul" des_es="Foul" end_speed="81.9" event_num="9" id="9" mt="" nasty="" pfx_x="-8.69" pfx_z="8.27" pitch_type="FT" play_guid="a2caf26f-c3fd-4f32-9855-7c36369a7aea" px="-0.2" pz="3.53" spin_dir="placeholder" spin_rate="placeholder" start_speed="89.4" sv_id="190814_022701" sz_bot="1.58" sz_top="3.35" tfs="022654" tfs_zulu="2019-08-14T02:26:54.000Z" type="S" type_confidence="placeholder" vx0="9.56" vy0="-129.85" vz0="-0.71" x="124.59" x0="-2.79" y="143.57" y0="50.0" z0="5.16" zone="placeholder"/><pitch ax="1.69" ay="23.07" az="-25.02" break_angle="4.8" break_length="7.2" break_y="24.0" cc="" code="B" des="Ball" des_es="Foul" end_speed="73.6" event_num="10" id="10" mt="" nasty="" pfx_x="1.21" pfx_z="5.12" pitch_type="FS" play_guid="75452ab5-758c-46cc-9da7-ebf6586ba9fe" px="0.05" pz="5.55" spin_dir="placeholder" spin_rate="placeholder" start_speed="80.9" sv_id="190814_022725" sz_bot="1.56" sz_top="3.36" tfs="022719" tfs_zulu="2019-08-14T02:27:19.000Z" type="B" type_confidence="placeholder" vx0="2.0" vy0="-117.67" vz0="3.42" x="115.15" x0="-0.97" y="88.91" y0="50.0" z0="6.4" zone="placeholder"/><pitch ax="-10.51" ay="19.93" az="-20.8" break_angle="24.0" break_length="7.2" break_y="24.0" cc="" code="X" des="In play, out(s)" des_es="Ball" end_speed="71.8" event_num="11" id="11" mt="" nasty="" pfx_x="-8.02" pfx_z="8.67" pitch_type="CH" play_guid="132f8425-90a2-4282-aef9-255a9832da79" px="0.26" pz="3.14" spin_dir="placeholder" spin_rate="placeholder" start_speed="78.1" sv_id="190814_022754" sz_bot="1.64" sz_top="3.49" tfs="022740" tfs_zulu="2019-08-14T02:27:40.000Z" type="X" type_confidence="placeholder" vx0="6.71" vy0="-113.54" vz0="-1.83" x="107.11" x0="-1.69" y="154.11" y0="50.0" z0="6.01" zone="placeholder"/><runner end="" event="Field Out" event_num="12" id="643217" start=""/></atbat><atbat away_team_runs="6" b="2" b_height="6' 2" batter="519048" des="Mitch Moreland strikes out swinging." des_es="Mitch Moreland strikes out swinging." end_tfs_zulu="2019-08-14T02:30:09.000Z" event="Strikeout" event_es="Strikeout" event_num="13" home_team_runs="5" num="76" o="2" p_throws="R" pitcher="461325" play_guid="74033275-7af4-43bf-96db-625c8676ea6c" s="3" stand="L" start_tfs="022816" start_tfs_zulu="2019-08-14T02:28:16.000Z"><pitch ax="3.81" ay="18.41" az="-42.2" break_angle="4.8" break_length="14.4" break_y="24.0" cc="" code="B" des="Ball" des_es="Swinging Strike" end_speed="67.3" event_num="14" id="14" mt="" nasty="" pfx_x="3.34" pfx_z="-8.78" pitch_type="CU" play_guid="556938eb-3aad-4796-921a-38072a8f82f7" px="-0.72" pz="3.71" spin_dir="placeholder" spin_rate="placeholder" start_speed="73.1" sv_id="190814_022826" sz_bot="1.7" sz_top="3.56" tfs="022821" tfs_zulu="2019-08-14T02:28:21.000Z" type="B" type_confidence="placeholder" vx0="0.64" vy0="-106.23" vz0="4.71" x="144.46" x0="-1.46" y="138.71" y0="50.0" z0="6.26" zone="placeholder"/><pitch ax="-15.59" ay="25.77" az="-16.97" break_angle="37.2" break_length="4.8" break_y="24.0" cc="" code="C" des="Called Strike" des_es="Ball" end_speed="83.2" event_num="15" id="15" mt="" nasty="" pfx_x="-8.88" pfx_z="8.66" pitch_type="FT" play_guid="cef51a89-2011-4954-867d-2b8c0f3315e3" px="-0.11" pz="1.46" spin_dir="placeholder" spin_rate="placeholder" start_speed="90.3" sv_id="190814_022849" sz_bot="1.7" sz_top="3.58" tfs="022844" tfs_zulu="2019-08-14T02:28:44.000Z" type="S" type_confidence="placeholder" vx0="8.32" vy0="-131.14" vz0="-7.25" x="121.17" x0="-2.16" y="199.26" y0="50.0" z0="5.51" zone="placeholder"/><pitch ax="-12.79" ay="20.54" az="-21.65" break_angle="27.6" break_length="7.2" break_y="24.0" cc="" code="F" des="Foul" des_es="Called Strike" end_speed="73.0" event_num="16" id="16" mt="" nasty="" pfx_x="-9.44" pfx_z="7.77" pitch_type="CH" play_guid="abfbe6cb-25c1-4042-9316-fb5e4d9e58df" px="-0.32" pz="2.7" spin_dir="placeholder" spin_rate="placeholder" start_speed="79.4" sv_id="190814_022917" sz_bot="1.64" sz_top="3.49" tfs="022907" tfs_zulu="2019-08-14T02:29:07.000Z" type="S" type_confidence="placeholder" vx0="7.16" vy0="-115.42" vz0="-2.14" x="129.22" x0="-2.23" y="165.79" y0="50.0" z0="5.72" zone="placeholder"/><pitch ax="-8.52" ay="21.5" az="-29.6" break_angle="13.2" break_length="8.4" break_y="24.0" cc="" code="B" des="Ball" des_es="Foul" end_speed="77.3" event_num="17" id="17" mt="" nasty="" pfx_x="-5.81" pfx_z="1.75" pitch_type="FS" play_guid="622b7128-5a9e-43d1-a83d-458379577bb0" px="1.58" pz="-1.54" spin_dir="placeholder" spin_rate="placeholder" start_speed="82.8" sv_id="190814_022938" sz_bot="1.73" sz_top="3.59" tfs="022933" tfs_zulu="2019-08-14T02:29:33.000Z" type="B" type_confidence="placeholder" vx0="7.39" vy0="-119.89" vz0="-11.26" x="56.91" x0="-0.78" y="280.43" y0="50.0" z0="5.83" zone="placeholder"/><pitch ax="-6.27" ay="21.1" az="-32.53" break_angle="9.6" break_length="9.6" break_y="24.0" cc="" code="S" des="Swinging Strike" des_es="Ball" end_speed="74.8" event_num="18" id="18" mt="" nasty="" pfx_x="-4.45" pfx_z="-0.25" pitch_type="FS" play_guid="74033275-7af4-43bf-96db-625c8676ea6c" px="0.14" pz="2.28" spin_dir="placeholder" spin_rate="placeholder" start_speed="80.8" sv_id="190814_023013" sz_bot="1.64" sz_top="3.49" tfs="023006" tfs_zulu="2019-08-14T02:30:06.000Z" type="S" type_confidence="placeholder" vx0="3.69" vy0="-117.58" vz0="-2.11" x="111.52" x0="-0.86" y="177.04" y0="50.0" z0="6.19" zone="placeholder"/><runner end="" event="Strikeout" event_num="19" id="519048" start=""/></atbat><atbat away_team_runs="6" b="1" b_height="6' 0" batter="593523" des="Marco Hernandez grounds out, second baseman Jason Kipnis to first baseman Carlos Santana." des_es="Marco Hernandez grounds out, second baseman Jason Kipnis to first baseman Carlos Santana." end_tfs_zulu="2019-08-14T02:34:03.000Z" event="Groundout" event_es="Groundout" event_num="20" home_team_runs="5" num="77" o="3" p_throws="R" pitcher="461325" play_guid="7be0edf9-89b7-41ab-a46e-f9a6dd9fe66f" s="2" stand="L" start_tfs="023046" start_tfs_zulu="2019-08-14T02:30:46.000Z"><pitch ax="-11.38" ay="20.03" az="-21.18" break_angle="25.2" break_length="7.2" break_y="24.0" cc="" code="F" des="Foul" des_es="In play, out(s)" end_speed="71.9" event_num="21" id="21" mt="" nasty="" pfx_x="-8.67" pfx_z="8.38" pitch_type="CH" play_guid="f167f319-3e99-4855-8524-1bf5c95f0244" px="0.49" pz="2.44" spin_dir="placeholder" spin_rate="placeholder" start_speed="78.2" sv_id="190814_023056" sz_bot="1.55" sz_top="3.29" tfs="023049" tfs_zulu="2019-08-14T02:30:49.000Z" type="S" type_confidence="placeholder" vx0="7.4" vy0="-113.62" vz0="-3.01" x="98.12" x0="-1.67" y="172.46" y0="50.0" z0="5.88" zone="placeholder"/><pitch ax="-9.73" ay="19.28" az="-20.52" break_angle="22.8" break_length="7.2" break_y="24.0" cc="" code="F" des="Foul" des_es="Foul" end_speed="73.3" event_num="22" id="22" mt="" nasty="" pfx_x="-7.15" pfx_z="8.56" pitch_type="CH" play_guid="37c567a0-f858-4ff9-b051-15d2fe777a24" px="0.18" pz="3.02" spin_dir="placeholder" spin_rate="placeholder" start_speed="79.3" sv_id="190814_023124" sz_bot="1.55" sz_top="3.29" tfs="023118" tfs_zulu="2019-08-14T02:31:18.000Z" type="S" type_confidence="placeholder" vx0="6.93" vy0="-115.34" vz0="-2.3" x="110.15" x0="-1.92" y="157.36" y0="50.0" z0="5.98" zone="placeholder"/><pitch ax="0.43" ay="20.7" az="-35.4" break_angle="1.2" break_length="10.8" break_y="24.0" cc="" code="F" des="Foul" des_es="Foul" end_speed="75.1" event_num="23" id="23" mt="" nasty="" pfx_x="0.31" pfx_z="-2.29" pitch_type="FS" play_guid="b4380884-81f2-4499-a9e5-2550a19b728e" px="1.08" pz="1.81" spin_dir="placeholder" spin_rate="placeholder" start_speed="80.8" sv_id="190814_023210" sz_bot="1.55" sz_top="3.29" tfs="023159" tfs_zulu="2019-08-14T02:31:59.000Z" type="S" type_confidence="placeholder" vx0="4.38" vy0="-117.54" vz0="-2.59" x="75.96" x0="-0.84" y="189.69" y0="50.0" z0="6.19" zone="placeholder"/><pitch ax="-6.22" ay="26.18" az="-12.42" break_angle="21.6" break_length="3.6" break_y="24.0" cc="" code="F" des="Foul" des_es="Foul" end_speed="82.6" event_num="24" id="24" mt="" nasty="" pfx_x="-3.55" pfx_z="11.3" pitch_type="FF" play_guid="d6ebc3f0-8cfe-437c-be12-046a8b6882a5" px="0.19" pz="4.12" spin_dir="placeholder" spin_rate="placeholder" start_speed="90.0" sv_id="190814_023230" sz_bot="1.55" sz_top="3.29" tfs="023225" tfs_zulu="2019-08-14T02:32:25.000Z" type="S" type_confidence="placeholder" vx0="5.33" vy0="-131.04" vz0="-2.3" x="109.77" x0="-1.4" y="127.55" y0="50.0" z0="5.93" zone="placeholder"/><pitch ax="-3.21" ay="22.21" az="-29.67" break_angle="4.8" break_length="8.4" break_y="24.0" cc="" code="F" des="Foul" des_es="Foul" end_speed="74.7" event_num="25" id="25" mt="" nasty="" pfx_x="-2.25" pfx_z="1.75" pitch_type="FS" play_guid="18557600-a40c-473a-a23b-afdf0ee94dd4" px="-0.1" pz="4.37" spin_dir="placeholder" spin_rate="placeholder" start_speed="81.5" sv_id="190814_023255" sz_bot="1.55" sz_top="3.29" tfs="023249" tfs_zulu="2019-08-14T02:32:49.000Z" type="S" type_confidence="placeholder" vx0="2.66" vy0="-118.49" vz0="1.66" x="120.76" x0="-0.94" y="120.84" y0="50.0" z0="6.37" zone="placeholder"/><pitch ax="5.96" ay="24.83" az="-28.88" break_angle="12.0" break_length="8.4" break_y="24.0" cc="" code="B" des="Ball" des_es="Foul" end_speed="75.9" event_num="26" id="26" mt="" nasty="" pfx_x="4.17" pfx_z="2.3" pitch_type="FS" play_guid="79431d75-ea08-44e8-917c-2f55f4924395" px="1.89" pz="-1.26" spin_dir="placeholder" spin_rate="placeholder" start_speed="82.4" sv_id="190814_023324" sz_bot="1.63" sz_top="3.3" tfs="023318" tfs_zulu="2019-08-14T02:33:18.000Z" type="B" type_confidence="placeholder" vx0="5.34" vy0="-119.3" vz0="-10.42" x="44.96" x0="-0.93" y="272.7" y0="50.0" z0="5.8" zone="placeholder"/><pitch ax="-3.34" ay="22.0" az="-39.06" break_angle="3.6" break_length="10.8" break_y="24.0" cc="" code="X" des="In play, out(s)" des_es="Ball" end_speed="75.1" event_num="27" id="27" mt="" nasty="" pfx_x="-2.36" pfx_z="-4.87" pitch_type="FS" play_guid="7be0edf9-89b7-41ab-a46e-f9a6dd9fe66f" px="0.43" pz="2.02" spin_dir="placeholder" spin_rate="placeholder" start_speed="81.1" sv_id="190814_023359" sz_bot="1.55" sz_top="3.29" tfs="023352" tfs_zulu="2019-08-14T02:33:52.000Z" type="X" type_confidence="placeholder" vx0="3.68" vy0="-118.01" vz0="-1.42" x="100.77" x0="-0.85" y="184.25" y0="50.0" z0="6.22" zone="placeholder"/><runner end="" event="Field Out" event_num="28" id="593523" start=""/></atbat></top><bottom><action away_team_runs="6" b="0" des="Pitching Change: Brandon Workman replaces Nathan Eovaldi." des_es="Pitching Change: Brandon Workman replaces Nathan Eovaldi." event="Pitching Substitution" event_es="Pitching Substitution" event_num="29" home_team_runs="5" o="0" pitch="1" player="519443" s="0" tfs="023625" tfs_zulu="2019-08-14T02:36:25.000Z"/><atbat away_team_runs="6" b="1" b_height="6' 0" batter="656185" des="Greg Allen singles on a line drive to right fielder Mookie Betts." des_es="Greg Allen singles on a line drive to right fielder Mookie Betts." end_tfs_zulu="2019-08-14T02:38:15.000Z" event="Single" event_es="Single" event_num="30" home_team_runs="5" num="78" o="0" p_throws="R" pitcher="519443" play_guid="5f528c85-3549-494b-be49-8b6f08d5568a" s="2" stand="L" start_tfs="023625" start_tfs_zulu="2019-08-14T02:36:25.000Z"><pitch ax="4.27" ay="21.64" az="-43.86" break_angle="6.0" break_length="12.0" break_y="24.0" cc="" code="C" des="Called Strike" des_es="Pitching Change: Brandon Workman replaces Nathan Eovaldi." end_speed="75.5" event_num="30" id="30" mt="" nasty="" pfx_x="3.0" pfx_z="-8.22" pitch_type="KC" play_guid="e06f83b0-a3ed-4c62-89bf-e84ee9796854" px="-0.68" pz="2.27" spin_dir="placeholder" spin_rate="placeholder" start_speed="81.1" sv_id="190814_023708" sz_bot="1.63" sz_top="3.4" tfs="023703" tfs_zulu="2019-08-14T02:37:03.000Z" type="S" type_confidence="placeholder" vx0="1.68" vy0="-118.25" vz0="-0.19" x="143.09" x0="-1.79" y="177.54" y0="50.0" z0="6.36" zone="placeholder"/><pitch ax="3.45" ay="22.07" az="-44.84" break_angle="4.8" break_length="13.2" break_y="24.0" cc="" code="S" des="Swinging Strike" des_es="Called Strike" end_speed="75.1" event_num="30" id="30" mt="" nasty="" pfx_x="2.47" pfx_z="-9.07" pitch_type="KC" play_guid="32bd833f-e3d1-488f-829e-3ce6d6656494" px="0.87" pz="1.55" spin_dir="placeholder" spin_rate="placeholder" start_speed="80.6" sv_id="190814_023724" sz_bot="1.57" sz_top="3.37" tfs="023718" tfs_zulu="2019-08-14T02:37:18.000Z" type="S" type_confidence="placeholder" vx0="5.28" vy0="-117.38" vz0="-1.59" x="83.79" x0="-1.73" y="196.97" y0="50.0" z0="6.41" zone="placeholder"/><pitch ax="5.44" ay="22.93" az="-45.58" break_angle="7.2" break_length="13.2" break_y="24.0" cc="" code="B" des="Ball" des_es="Swinging Strike" end_speed="74.6" event_num="30" id="30" mt="" nasty="" pfx_x="3.88" pfx_z="-9.56" pitch_type="KC" play_guid="1d69625b-c575-408f-ac2e-407a77f96065" px="-1.44" pz="3.05" spin_dir="placeholder" spin_rate="placeholder" start_speed="80.9" sv_id="190814_023748" sz_bot="1.61" sz_top="3.27" tfs="023743" tfs_zulu="2019-08-14T02:37:43.000Z" type="B" type_confidence="placeholder" vx0="-0.44" vy0="-117.86" vz0="1.7" x="172.0" x0="-1.76" y="156.35" y0="50.0" z0="6.54" zone="placeholder"/><pitch ax="4.25" ay="23.6" az="-45.69" break_angle="6.0" break_length="13.2" break_y="24.0" cc="" code="D" des="In play, no out" des_es="Ball" end_speed="75.4" event_num="30" id="30" mt="" nasty="" pfx_x="3.01" pfx_z="-9.55" pitch_type="KC" play_guid="5f528c85-3549-494b-be49-8b6f08d5568a" px="0.2" pz="1.37" spin_dir="placeholder" spin_rate="placeholder" start_speed="81.4" sv_id="190814_023817" sz_bot="1.57" sz_top="3.37" tfs="023804" tfs_zulu="2019-08-14T02:38:04.000Z" type="X" type_confidence="placeholder" vx0="3.18" vy0="-118.47" vz0="-1.71" x="109.55" x0="-1.56" y="201.66" y0="50.0" z0="6.29" zone="placeholder"/><runner end="1B" event="Single" event_num="31" id="656185" start=""/></atbat><action away_team_runs="6" b="1" des="Greg Allen steals (3) 2nd base." des_es="Greg Allen steals (3) 2nd base." event="Stolen Base 2B" event_es="Stolen Base 2B" event_num="32" home_team_runs="5" o="0" pitch="2" player="656185" s="1" tfs="023942" tfs_zulu="2019-08-14T02:39:42.000Z"/><atbat away_team_runs="6" b="1" b_height="6' 2" batter="571980" des="Tyler Naquin strikes out on a foul tip." des_es="Tyler Naquin strikes out on a foul tip." end_tfs_zulu="2019-08-14T02:41:02.000Z" event="Strikeout" event_es="Strikeout" event_num="33" home_team_runs="5" num="79" o="1" p_throws="R" pitcher="519443" play_guid="8e2b5eb2-8bd9-4675-bb8e-ad18d1525b75" s="3" stand="L" start_tfs="023857" start_tfs_zulu="2019-08-14T02:38:57.000Z"><pitch ax="-1.54" ay="24.97" az="-18.03" break_angle="1.2" break_length="3.6" break_y="24.0" cc="" code="B" des="Ball" des_es="Foul Tip" end_speed="86.4" event_num="33" id="33" mt="" nasty="" pfx_x="-0.81" pfx_z="7.47" pitch_type="FF" play_guid="debd1e32-0d24-4b02-9f24-3ec24117be11" px="0.45" pz="4.87" spin_dir="placeholder" spin_rate="placeholder" start_speed="92.9" sv_id="190814_023904" sz_bot="1.53" sz_top="3.33" tfs="023900" tfs_zulu="2019-08-14T02:39:00.000Z" type="B" type_confidence="placeholder" vx0="5.46" vy0="-135.59" vz0="-1.02" x="99.75" x0="-1.47" y="107.21" y0="50.0" z0="6.49" zone="placeholder"/><pitch ax="-2.74" ay="25.51" az="-16.88" break_angle="6.0" break_length="3.6" break_y="24.0" cc="" code="C" des="Called Strike" des_es="Ball" end_speed="85.3" event_num="33" id="33" mt="" nasty="" pfx_x="-1.48" pfx_z="8.28" pitch_type="FF" play_guid="1ec93890-d8ea-48e3-b2d4-105330a33377" px="-0.11" pz="3.45" spin_dir="placeholder" spin_rate="placeholder" start_speed="92.0" sv_id="190814_023933" sz_bot="1.53" sz_top="3.28" tfs="023926" tfs_zulu="2019-08-14T02:39:26.000Z" type="S" type_confidence="placeholder" vx0="4.17" vy0="-134.2" vz0="-4.39" x="121.35" x0="-1.48" y="145.72" y0="50.0" z0="6.28" zone="placeholder"/><pitch ax="-1.2" ay="26.98" az="-14.81" break_angle="2.4" break_length="3.6" break_y="24.0" cc="" code="F" des="Foul" des_es="Greg Allen steals (3) 2nd base." end_speed="85.9" event_num="33" id="33" mt="" nasty="" pfx_x="-0.64" pfx_z="9.24" pitch_type="FF" play_guid="b0857f2e-f82b-4b6f-9c5c-79279e643502" px="-0.24" pz="3.72" spin_dir="placeholder" spin_rate="placeholder" start_speed="93.0" sv_id="190814_024025" sz_bot="1.62" sz_top="3.41" tfs="024018" tfs_zulu="2019-08-14T02:40:18.000Z" type="S" type_confidence="placeholder" vx0="3.29" vy0="-135.61" vz0="-4.23" x="126.27" x0="-1.39" y="138.34" y0="50.0" z0="6.32" zone="placeholder"/><pitch ax="-0.8" ay="25.65" az="-13.69" break_angle="1.2" break_length="3.6" break_y="24.0" cc="" code="T" des="Foul Tip" des_es="Foul" end_speed="87.7" event_num="33" id="33" mt="" nasty="" pfx_x="-0.41" pfx_z="9.49" pitch_type="FF" play_guid="8e2b5eb2-8bd9-4675-bb8e-ad18d1525b75" px="0.64" pz="3.6" spin_dir="placeholder" spin_rate="placeholder" start_speed="94.3" sv_id="190814_024059" sz_bot="1.62" sz_top="3.41" tfs="024054" tfs_zulu="2019-08-14T02:40:54.000Z" type="S" type_confidence="placeholder" vx0="5.62" vy0="-137.54" vz0="-5.04" x="92.75" x0="-1.37" y="141.64" y0="50.0" z0="6.36" zone="placeholder"/><runner end="2B" event="Stolen Base 2B" event_num="34" id="656185" start="1B"/><runner end="" event="Strikeout" event_num="35" id="571980" start=""/></atbat><atbat away_team_runs="6" b="2" b_height="5' 11" batter="596019" des="Francisco Lindor doubles (29) on a line drive to left fielder Andrew Benintendi.   Greg Allen scores." des_es="Francisco Lindor doubles (29) on a line drive to left fielder Andrew Benintendi.   Greg Allen scores." end_tfs_zulu="2019-08-14T02:43:41.000Z" event="Double" event_es="Double" event_num="36" home_team_runs="6" num="80" o="1" p_throws="R" pitcher="519443" play_guid="19c1d038-a8b0-446b-b0a9-4850cd832976" s="1" stand="L" start_tfs="024140" start_tfs_zulu="2019-08-14T02:41:40.000Z"><pitch ax="6.1" ay="19.28" az="-42.84" break_angle="8.4" break_length="13.2" break_y="24.0" cc="" code="B" des="Ball" des_es="In play, run(s)" end_speed="73.8" event_num="36" id="36" mt="" nasty="" pfx_x="4.47" pfx_z="-7.81" pitch_type="KC" play_guid="24389988-3580-4203-a2c0-5a9a67bb27ef" px="-0.91" pz="4.15" spin_dir="placeholder" spin_rate="placeholder" start_speed="79.3" sv_id="190814_024148" sz_bot="1.53" sz_top="3.2" tfs="024143" tfs_zulu="2019-08-14T02:41:43.000Z" type="B" type_confidence="placeholder" vx0="0.5" vy0="-115.51" vz0="3.79" x="151.68" x0="-1.71" y="126.59" y0="50.0" z0="6.58" zone="placeholder"/><pitch ax="-0.81" ay="25.86" az="-12.91" break_angle="1.2" break_length="3.6" break_y="24.0" cc="" code="B" des="Ball" des_es="Ball" end_speed="87.1" event_num="36" id="36" mt="" nasty="" pfx_x="-0.42" pfx_z="10.09" pitch_type="FF" play_guid="57c71afd-bf74-4121-b1a7-7c5c3596e713" px="0.65" pz="1.6" spin_dir="placeholder" spin_rate="placeholder" start_speed="93.7" sv_id="190814_024213" sz_bot="1.49" sz_top="3.26" tfs="024208" tfs_zulu="2019-08-14T02:42:08.000Z" type="B" type_confidence="placeholder" vx0="5.62" vy0="-136.33" vz0="-9.95" x="92.21" x0="-1.37" y="195.71" y0="50.0" z0="6.15" zone="placeholder"/><pitch ax="5.09" ay="23.98" az="-44.33" break_angle="7.2" break_length="13.2" break_y="24.0" cc="" code="F" des="Foul" des_es="Ball" end_speed="75.2" event_num="36" id="36" mt="" nasty="" pfx_x="3.58" pfx_z="-8.56" pitch_type="KC" play_guid="2d85de91-6a82-4450-895e-9b4d35b44bcb" px="-0.14" pz="2.33" spin_dir="placeholder" spin_rate="placeholder" start_speed="81.6" sv_id="190814_024258" sz_bot="1.55" sz_top="3.29" tfs="024253" tfs_zulu="2019-08-14T02:42:53.000Z" type="S" type_confidence="placeholder" vx0="2.16" vy0="-118.76" vz0="-0.06" x="122.43" x0="-1.53" y="175.7" y0="50.0" z0="6.41" zone="placeholder"/><pitch ax="-0.79" ay="27.08" az="-13.29" break_angle="1.2" break_length="3.6" break_y="24.0" cc="" code="E" des="In play, run(s)" des_es="Foul" end_speed="87.2" event_num="36" id="36" mt="" nasty="" pfx_x="-0.41" pfx_z="9.78" pitch_type="FF" play_guid="19c1d038-a8b0-446b-b0a9-4850cd832976" px="-0.13" pz="3.28" spin_dir="placeholder" spin_rate="placeholder" start_speed="94.1" sv_id="190814_024339" sz_bot="1.55" sz_top="3.29" tfs="024324" tfs_zulu="2019-08-14T02:43:24.000Z" type="X" type_confidence="placeholder" vx0="3.3" vy0="-137.29" vz0="-5.87" x="121.96" x0="-1.29" y="150.23" y0="50.0" z0="6.33" zone="placeholder"/><runner end="3B" event="Double" event_num="37" id="656185" start="2B"/><runner earned="T" end="score" event="Double" event_num="38" id="656185" rbi="T" score="T" start="3B"/><runner end="2B" event="Double" event_num="39" id="596019" start=""/></atbat><action away_team_runs="6" b="0" des="Mound Visit." des_es="Mound Visit." event="Game Advisory" event_es="Game Advisory" event_num="40" home_team_runs="6" o="1" pitch="1" player="640458" s="0" tfs="024358" tfs_zulu="2019-08-14T02:43:58.000Z"/><action away_team_runs="6" b="1" des="Red Sox challenged (tag play), call on the field was overturned: Francisco Lindor caught stealing 3rd base, catcher Sandy Leon to third baseman Rafael Devers." des_es="Red Sox challenged (tag play), call on the field was overturned: Francisco Lindor caught stealing 3rd base, catcher Sandy Leon to third baseman Rafael Devers." event="Caught Stealing 3B" event_es="Caught Stealing 3B" event_num="41" home_team_runs="6" o="2" pitch="2" player="596019" s="1" tfs="024626" tfs_zulu="2019-08-14T02:46:26.000Z"/><atbat away_team_runs="6" b="2" b_height="6' 2" batter="640458" des="Oscar Mercado flies out to right fielder Mookie Betts." des_es="Oscar Mercado flies out to right fielder Mookie Betts." end_tfs_zulu="2019-08-14T02:48:56.000Z" event="Flyout" event_es="Flyout" event_num="42" home_team_runs="6" num="81" o="3" p_throws="R" pitcher="519443" play_guid="78e11bb9-46d2-43db-87b1-720077fc48ab" s="2" stand="R" start_tfs="024358" start_tfs_zulu="2019-08-14T02:43:58.000Z"><pitch ax="5.3" ay="21.98" az="-45.38" break_angle="7.2" break_length="13.2" break_y="24.0" cc="" code="F" des="Foul" des_es="Mound Visit." end_speed="73.3" event_num="42" id="42" mt="" nasty="" pfx_x="3.93" pfx_z="-9.78" pitch_type="KC" play_guid="2e28ff2f-84b2-4402-bf9e-34098a43fda4" px="-0.84" pz="2.81" spin_dir="placeholder" spin_rate="placeholder" start_speed="79.3" sv_id="190814_024522" sz_bot="1.67" sz_top="3.52" tfs="024516" tfs_zulu="2019-08-14T02:45:16.000Z" type="S" type_confidence="placeholder" vx0="0.84" vy0="-115.58" vz0="1.55" x="149.03" x0="-1.71" y="162.38" y0="50.0" z0="6.5" zone="placeholder"/><pitch ax="-2.37" ay="27.06" az="-14.37" break_angle="4.8" break_length="3.6" break_y="24.0" cc="" code="B" des="Ball" des_es="Foul" end_speed="85.3" event_num="42" id="42" mt="" nasty="" pfx_x="-1.27" pfx_z="9.57" pitch_type="FF" play_guid="84ed45f3-86d5-4695-bdea-f239d2898bf6" px="0.18" pz="4.68" spin_dir="placeholder" spin_rate="placeholder" start_speed="92.5" sv_id="190814_024617" sz_bot="1.55" sz_top="3.48" tfs="024610" tfs_zulu="2019-08-14T02:46:10.000Z" type="B" type_confidence="placeholder" vx0="5.19" vy0="-134.99" vz0="-1.84" x="110.12" x0="-1.59" y="112.38" y0="50.0" z0="6.38" zone="placeholder"/><pitch ax="3.34" ay="21.72" az="-44.78" break_angle="4.8" break_length="13.2" break_y="24.0" cc="" code="B" des="Ball" des_es="Red Sox challenged (tag play), call on the field was overturned: Francisco Lindor caught stealing 3rd base, catcher Sandy Leon to third baseman Rafael Devers." end_speed="72.1" event_num="42" id="42" mt="" nasty="" pfx_x="2.55" pfx_z="-9.63" pitch_type="KC" play_guid="d0071f9b-b203-4160-8220-f257f6fcf9a9" px="-1.32" pz="3.36" spin_dir="placeholder" spin_rate="placeholder" start_speed="78.2" sv_id="190814_024804" sz_bot="1.61" sz_top="3.46" tfs="024759" tfs_zulu="2019-08-14T02:47:59.000Z" type="B" type_confidence="placeholder" vx0="-0.25" vy0="-113.92" vz0="2.64" x="167.28" x0="-1.54" y="147.95" y0="50.0" z0="6.63" zone="placeholder"/><pitch ax="0.86" ay="21.62" az="-31.97" break_angle="2.4" break_length="8.4" break_y="24.0" cc="" code="F" des="Foul" des_es="Ball" end_speed="79.9" event_num="42" id="42" mt="" nasty="" pfx_x="0.53" pfx_z="0.13" pitch_type="FC" play_guid="101f471e-8445-4cc9-b042-6810a736ee51" px="-0.1" pz="3.46" spin_dir="placeholder" spin_rate="placeholder" start_speed="85.7" sv_id="190814_024823" sz_bot="1.67" sz_top="3.52" tfs="024818" tfs_zulu="2019-08-14T02:48:18.000Z" type="S" type_confidence="placeholder" vx0="4.53" vy0="-124.97" vz0="-0.77" x="120.71" x0="-1.99" y="145.2" y0="50.0" z0="6.36" zone="placeholder"/><pitch ax="0.22" ay="25.75" az="-12.25" break_angle="4.8" break_length="2.4" break_y="24.0" cc="" code="X" des="In play, out(s)" des_es="Foul" end_speed="85.9" event_num="42" id="42" mt="" nasty="" pfx_x="0.12" pfx_z="10.68" pitch_type="FF" play_guid="78e11bb9-46d2-43db-87b1-720077fc48ab" px="0.79" pz="2.49" spin_dir="placeholder" spin_rate="placeholder" start_speed="92.6" sv_id="190814_024855" sz_bot="1.67" sz_top="3.52" tfs="024842" tfs_zulu="2019-08-14T02:48:42.000Z" type="X" type_confidence="placeholder" vx0="5.74" vy0="-134.84" vz0="-8.04" x="86.72" x0="-1.37" y="171.45" y0="50.0" z0="6.35" zone="placeholder"/><runner end="" event="Caught Stealing 3B" event_num="43" id="596019" start="2B"/><runner end="" event="Field Out" event_num="44" id="640458" start=""/></atbat></bottom></inning>"#;
+
+    let mut game_days: Vec<String> = Vec::with_capacity(4_000);
+    let mut games: Vec<String> = Vec::with_capacity(3_000);
     
-    // let inning: Inning = serde_xml_rs::from_str(inning_xml).unwrap();
-    // dbg!(inning);
+    println! ("Collecting Game Links...");
 
-    // dbg!(at_bat);
+    for month in &months {
+        for day in &days {
+            let url = game_day_url("mlb", "2008", month, day);
+            game_days.push(url);
+        }
+    };
 
-    // dbg!(game_download_parse(&games[0]));
+
+    let games: Vec<String> = game_days.par_iter()
+                .map(|url| game_day_links(&url).unwrap_or(Vec::new()))
+                .flatten()
+                .collect();
+    
+    let start_time = time::Instant::now();
+   
+    println! ("Starting game processing...");
+
+    // dbg!(&games[1000]);
+
+    let game_data: Vec<_> = games.par_iter()
+                .skip(1000)
+                .take(1)
+                .map(|game| game_download_parse(&gd_client, game))
+                .collect(); 
+
+    // for pitch in &game_data[0].as_ref().unwrap().pitches {
+    //     if pitch.az == Some(-11.462) || pitch.az == Some(-40.059) {
+    //         dbg!(pitch);
+    //     }
+    // }
+
+    let time_elapsed = start_time.elapsed().as_millis() as f32;
+    
+    println! ("Processed {} games in {} seconds", game_data.len(), time_elapsed / 1000.0);
+
 }
 
 
