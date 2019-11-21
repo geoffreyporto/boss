@@ -25,6 +25,11 @@ Building a baseball data engine in Rust will enable everyday fans to perform dat
 
 This project is also a learning project for the author and should change a lot as the author better hones his Rust skills.
 
+### Features
+* Parallel out of the box. Player bios are memoized (cached) once they've been downloaded once, drastically reducing the number of network calls.
+* Captures historical player weight info
+* Flattens out all the data and serializes to an easy to use CSV file.
+
 ### Roadmap
 
 * Tools to gather data from the GameDay xml files, for all levels of affiliated baseball

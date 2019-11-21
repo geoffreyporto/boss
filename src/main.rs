@@ -7,8 +7,10 @@ use isahc::prelude::*;
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize, Deserializer};
 use std::{error, fmt, num};
-use std::collections::HashMap;
+use std::collections::{HashMap};
+use std::sync::{Arc, RwLock};
 use std::time;
+
 mod draft;
 
 // use csv::Writer;
@@ -686,7 +688,7 @@ fn inning_xml_parse (http_client: &HttpClient, inning_links: Vec<String>) -> Res
         .collect()
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PlayerBio {
     id: u32,
@@ -719,72 +721,90 @@ struct PlayerBioGame {
 //Decides wether to look in the batter or pitcher folder for the player xml
 
 
-fn get_player_data(http_client: &HttpClient, url: &str, player: Player) -> Result<PlayerBioGame, GameDayError> {
+fn get_player_data
+    (http_client: &HttpClient,
+     url: &str,
+     player_bio_map: &Arc<RwLock<HashMap<u32, PlayerBio>>>,
+     player: Player,
+    ) 
+    -> Result<PlayerBioGame, GameDayError> {
 
-    let url_json =  String::from("http://statsapi.mlb.com/api/v1/people/") + &player.id.to_string();
+    if player_bio_map.read().unwrap().contains_key(&player.id)  {
+        let player_bio = player_bio_map.read().unwrap().get(&player.id).unwrap().clone();
+        
+        Ok(PlayerBioGame {
+            bio: player_bio,
+            game: player,
+        })
+    }
+    else {
+        let url_json =  String::from("http://statsapi.mlb.com/api/v1/people/") + &player.id.to_string();
 
-    // We pull the primary data from the mlb API as it is more reliable. Eventually, we'll want to avoid doing this once
-    // per game and store a local version that will be checked first. For the first iteration, this simplifies the
-    // implementation considerably.
-    
-    let raw_json_data = &http_client.get(&url_json)?.text()?;
+        // We pull the primary data from the mlb API as it is more reliable. Eventually, we'll want to avoid doing this once
+        // per game and store a local version that will be checked first. For the first iteration, this simplifies the
+        // implementation considerably.
+        
+        let raw_json_data = &http_client.get(&url_json)?.text()?;
 
-    // This is an ugly way to just get at the "people" field, but it has less indirection so doing it this way for now        
-    let json_data = raw_json_data
-                .split (r#""people" : [ "#)
-                .nth(1).unwrap_or("")
-                .trim_end_matches("}")
-                .trim()
-                .trim_end_matches("]")
-                .trim()
-                ;
+        // This is an ugly way to just get at the "people" field, but it has less indirection so doing it this way for now        
+        let json_data = raw_json_data
+                    .split (r#""people" : [ "#)
+                    .nth(1).unwrap_or("")
+                    .trim_end_matches("}")
+                    .trim()
+                    .trim_end_matches("]")
+                    .trim()
+                    ;
 
-    let mut player_bio: PlayerBio = serde_json::from_str(&json_data)?;
+        let mut player_bio: PlayerBio = serde_json::from_str(&json_data)?;
 
-    // We want to have our height measurable as an integral number suitable for input into models
-    // First, we split by the ' giving us a small vector of length 1 or 2. We enumerate this vector
-    // and then multiply the first element by 12^1 and the second element by 12^0. If we have a third
-    // element for some reason, this should be an error, but we're ignoring that case for now.
-    player_bio.height_in = player_bio.height
-                    .split('\'')
-                    .filter_map(|h| h.trim().parse().ok())
-                    .enumerate()
-                    .map(|(n, h): (usize, u32)| h * 12u32.pow(1-n as u32))
-                    .sum();   
+        // We want to have our height measurable as an integral number suitable for input into models
+        // First, we split by the ' giving us a small vector of length 1 or 2. We enumerate this vector
+        // and then multiply the first element by 12^1 and the second element by 12^0. If we have a third
+        // element for some reason, this should be an error, but we're ignoring that case for now.
+        player_bio.height_in = player_bio.height
+                        .split('\'')
+                        .filter_map(|h| h.trim().parse().ok())
+                        .enumerate()
+                        .map(|(n, h): (usize, u32)| h * 12u32.pow(1-n as u32))
+                        .sum();   
 
-    // The GameDay xml has a weight field which holds some potentially interesting historical data. 
-    // The above API only shows the current player's weight, not how much he weighed 10 years ago.
-    // Seeing a player's weight gain curve could be interesting. These data are sometimes missing, so at
-    // some point we'll need to iterate through all those records and 
-    // 
-    // We don't want to propogate an error here, since we don't want this to fail when the file isn't available.player_json
-    // We'll just return none if there's an issue.
+        // The GameDay xml has a weight field which holds some potentially interesting historical data. 
+        // The above API only shows the current player's weight, not how much he weighed 10 years ago.
+        // Seeing a player's weight gain curve could be interesting. These data are sometimes missing, so at
+        // some point we'll need to iterate through all those records and 
+        // 
+        // We don't want to propogate an error here, since we don't want this to fail when the file isn't available.player_json
+        // We'll just return none if there's an issue.
 
-    let url_xml = 
-        if player.position == "P" {
-            String::from(url) + "pitchers/" + &player.id.to_string() + ".xml"
-        }
-        else {
-            String::from(url) + "batters/" + &player.id.to_string() + ".xml"
+        let url_xml = 
+            if player.position == "P" {
+                String::from(url) + "pitchers/" + &player.id.to_string() + ".xml"
+            }
+            else {
+                String::from(url) + "batters/" + &player.id.to_string() + ".xml"
+            };
+
+        let player_xml_text = match http_client.get(&url_xml) {
+            Ok(mut resp) => resp.text().unwrap(),
+            _ => "".to_string(),
         };
 
-    let player_xml_text = match http_client.get(&url_xml) {
-        Ok(mut resp) => resp.text().unwrap(),
-        _ => "".to_string(),
-    };
+        let player_xml: Result<PlayerXml, serde_xml_rs::Error> = serde_xml_rs::from_str(&player_xml_text);
 
-    let player_xml: Result<PlayerXml, serde_xml_rs::Error> = serde_xml_rs::from_str(&player_xml_text);
+        player_bio.weight_v2 = match player_xml {
+            Ok(player) => Some(player.weight),
+            _ => None,
+        };
 
-    player_bio.weight_v2 = match player_xml {
-        Ok(player) => Some(player.weight),
-        _ => None,
-    };
+        Ok(PlayerBioGame {
+            bio: player_bio,
+            game: player,
+        })
+    }
 
 
-    Ok(PlayerBioGame {
-        bio: player_bio,
-        game: player,
-    })
+
 
 }
 
@@ -840,19 +860,19 @@ fn process_plate_appearance (plate_appearance: PlateAppearance, base_state: u8, 
                 // The Runner data will update values relative to the previous pitch
                 let event = runner.event.to_lowercase();
 
-                // If there is a stolen base attempt, or pick off attempt we want to make sure we don't credit/debit the batter for the changed base/out state
-                if event.contains("stolen") 
-                    || event.contains("stealing") 
-                    || event.contains("pickoff") 
-                    || event.contains("picked off")
-                    {pitches[pitch_num-1].plate_appearance_state.batter_responsible = false}
-                else {pitches[pitch_num-1].plate_appearance_state.batter_responsible = true};
                 
                 let (end, runs, outs) = process_base_state(base_state, runner);
                 if pitch_num > 0 {
                     pitches[pitch_num-1].plate_appearance_state.base_state_end = end;
                     pitches[pitch_num-1].plate_appearance_state.outs_end = end;
                     pitches[pitch_num-1].plate_appearance_state.runs_scored += runs;
+                    // If there is a stolen base attempt, or pick off attempt we want to make sure we don't credit/debit the batter for the changed base/out state
+                    if event.contains("stolen") 
+                        || event.contains("stealing") 
+                        || event.contains("pickoff") 
+                        || event.contains("picked off")
+                        {pitches[pitch_num-1].plate_appearance_state.batter_responsible = false}
+                    else {pitches[pitch_num-1].plate_appearance_state.batter_responsible = true};
                 }
 
                 base_state = end;        
@@ -911,15 +931,17 @@ fn process_plate_appearance (plate_appearance: PlateAppearance, base_state: u8, 
 
     }
 
-    // This should be authomatically calculated by the runners, however in the chance that the data are corrupt 
-    // we force the last pitch of at_bat to reflect the plate appearance outs_end value
-    pitches[pitch_num-1].plate_appearance_state.outs_end = plate_appearance.outs_end;
+    if pitch_num > 0 {
+        // This should be authomatically calculated by the runners, however in the chance that the data are corrupt 
+        // we force the last pitch of at_bat to reflect the plate appearance outs_end value
+        pitches[pitch_num-1].plate_appearance_state.outs_end = plate_appearance.outs_end;
 
-    // There is a bug in the data where if there is a pickoff attempt early in count, a base hit runner event
-    // could be logged in as a "pickoff attempt". If the last pitch of the atbat was put in play, we'll override the
-    // responsibility here
-    if pitches[pitch_num-1].pitch_result == 'X' {
-        pitches[pitch_num-1].plate_appearance_state.batter_responsible = true
+        // There is a bug in the data where if there is a pickoff attempt early in count, a base hit runner event
+        // could be logged in as a "pickoff attempt". If the last pitch of the atbat was put in play, we'll override the
+        // responsibility here
+        if pitches[pitch_num-1].pitch_result == 'X' {
+            pitches[pitch_num-1].plate_appearance_state.batter_responsible = true
+        }
     }
 
     (pitches, base_state)
@@ -974,9 +996,6 @@ fn process_inning_data (inning_data: Vec<Inning>, players: HashMap<u32, PlayerBi
 
 }
 
-
-
-
 /// Takes in a base url for each game, downloads all the relevant xml files and parses them
 /// 
 /// The linescore.xml file contains imporant metadata about the game, such as venue and date
@@ -987,9 +1006,12 @@ fn process_inning_data (inning_data: Vec<Inning>, players: HashMap<u32, PlayerBi
 /// 
 /// The players.xml file gives us the initial position of all the players as well as the coaches and umpires for the game
 /// 
+///
 /// 
 
-fn game_download_parse (http_client: &HttpClient, url: &str) -> Result <GameData, GameDayError> {
+fn game_download_parse 
+    (http_client: &HttpClient, player_bio_map: &Arc<RwLock<HashMap<u32, PlayerBio>>>, url: &str) 
+    -> Result <GameData, GameDayError> {
 
     let linescore_url = format!("{}linescore.xml", url);
     let boxscore_url = format!("{}boxscore.xml", url);
@@ -998,18 +1020,20 @@ fn game_download_parse (http_client: &HttpClient, url: &str) -> Result <GameData
     // dbg!(&linescore_url);
 
     let linescore_xml = http_client.get(&linescore_url)?.text()?.replace('&', "&amp;");
+    let boxscore_xml = http_client.get(&boxscore_url)?.text()?;
+    let players_xml = http_client.get(&players_url)?.text()?; 
+
     let linescore_data: LineScoreData = serde_xml_rs::from_str(&linescore_xml)?;
 
     // dbg!(&linescore_data);
 
     let inning_links = create_inning_links(url, &linescore_data.innings);
     let inning_hit_link = url.to_string() + "inning/inning_hit.xml";
-    
     let inning_data = inning_xml_parse(http_client, inning_links)?;
+    
 
     // dbg!(&inning_data[0]);
 
-    let boxscore_xml = http_client.get(&boxscore_url)?.text()?;
     
     let items = split_boxscore_xml(&boxscore_xml)?;
 
@@ -1017,19 +1041,21 @@ fn game_download_parse (http_client: &HttpClient, url: &str) -> Result <GameData
     let (wind_speed, wind_direction) = parse_weather(items[1])?;
     let attendance: Option<u32> = if items.len() > 2 {parse_attendance(items[2])?} else {None};
 
-    let players_xml = http_client.get(&players_url)?.text()?;
     let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
 
-
-    let players: HashMap <u32, PlayerBioGame> = player_data.teams.iter()
+    let players: HashMap <u32, PlayerBioGame> = player_data.teams.par_iter()
                         .map(|team| team.players.clone())
                         .flatten()
-                        .filter_map(|player| get_player_data(http_client, url, player).ok())
+                        .filter_map(|player| get_player_data(http_client, url, player_bio_map, player).ok())
                         .map(|player| (player.game.id, player))
                         .collect();
 
-    dbg!(&players);
-
+    for (id, player) in &players {
+        if player_bio_map.read().unwrap().contains_key(&id) == false {
+            player_bio_map.write().unwrap().insert(*id, player.bio.clone());
+        }
+    };                        
+   
     let game_umps: GameUmpires = player_data.umpires.into();
     
     let boxscore_data = BoxScoreData {weather_temp, weather_condition, wind_speed, wind_direction, attendance};
@@ -1070,6 +1096,8 @@ fn main () {
 
     let games: Vec<String> = game_days.par_iter()
                 .map(|url| game_day_links(&url).unwrap_or(Vec::new()))
+                // .skip(1000)
+                // .take(100)
                 .flatten()
                 .collect();
     
@@ -1079,10 +1107,18 @@ fn main () {
 
     // dbg!(&games[1000]);
 
+    
+    let player_bio_map: Arc<RwLock<HashMap<u32, PlayerBio>>> = 
+        Arc::new(
+            RwLock::new (
+                HashMap::new()
+            )
+        );
+
     let game_data: Vec<_> = games.par_iter()
-                .skip(1000)
-                .take(1)
-                .map(|game| game_download_parse(&gd_client, game))
+                // .skip(1000)
+                .take(1000)
+                .map(|game| game_download_parse(&gd_client, &player_bio_map, game))
                 .collect(); 
 
     // for pitch in &game_data[0].as_ref().unwrap().pitches {
