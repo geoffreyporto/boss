@@ -16,8 +16,7 @@ baseball = "0.1"
 ```
 ### Prior Art
 
-[baseballr](https://github.com/BillPetti/baseballr) by Bill Petti
-
+[baseballr](https://github.com/BillPetti/baseballr) by Bill Petti<br>
 [pitchrx](https://github.com/cpsievert/pitchRx) by Carson Sievert
 
 ### Motivation
