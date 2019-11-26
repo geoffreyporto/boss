@@ -10,6 +10,7 @@ use std::{error, fmt, num};
 use std::collections::{HashMap};
 use std::sync::{Arc, RwLock};
 use std::time;
+use futures::{executor, join, stream::*};
 
 mod draft;
 
@@ -83,8 +84,6 @@ struct Player {
     name_last: String,
     game_position: Option<String>,
     bat_order: Option<u8>,
-    team_id: u32,
-    team_abbrev: String,
     position: String,
 }
 
@@ -257,6 +256,16 @@ struct PickOff {
     des: String,
 }
 
+// The fields *could* be integers, but generally speaking, we need them to load into urls, so better to just
+// leave them as strings
+#[derive(Deserialize, Serialize, Debug)]
+struct GameDateLevel {
+    year: String,
+    month: String,
+    day: String,
+    level: String,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct PlateAppearanceState {
     balls_start: u8,
@@ -418,6 +427,13 @@ impl GameData {
     }
 }
 
+struct PlayerWeightCache {
+    id: u32,
+    year: String,
+    level: String,
+    weight: u16,
+}
+
 #[derive(Debug)]
 struct WeatherMissingError {
     err_msg: String,
@@ -472,6 +488,7 @@ impl error::Error for GameDayMissingLinksError {
 enum GameDayError {
     Request(isahc::Error),
     XMLParse(serde_xml_rs::Error),
+    QuickXMLParse(quick_xml::de::DeError),
     JSONParse(serde_json::Error),
     ParseIntError(num::ParseIntError),
     Weather(WeatherMissingError),
@@ -483,6 +500,7 @@ impl fmt::Display for GameDayError {
         match *self {
             GameDayError::Request(ref err) => write!(f, "Network Error: {}", err),
             GameDayError::XMLParse(ref err) => write!(f, "XML Parse Error: {}", err),
+            GameDayError::QuickXMLParse(ref err) => write!(f, "Quick XML Parse Error: {}", err),
             GameDayError::JSONParse(ref err) => write!(f, "JSON Parse Error: {}", err),
             GameDayError::Weather(ref err) => write!(f, "Weather Error: {}", err),
             GameDayError::ParseIntError(ref err) => write!(f, "Interger Parse Error: {}", err),
@@ -496,6 +514,7 @@ impl error::Error for GameDayError {
         match *self {
             GameDayError::Request(ref err) => err.description(),
             GameDayError::XMLParse(ref err) => err.description(),
+            GameDayError::QuickXMLParse(ref err) => err.description(),
             GameDayError::JSONParse(ref err) => err.description(),
             GameDayError::Weather(ref err) => err.description(),
             GameDayError::ParseIntError(ref err) => err.description(),
@@ -506,6 +525,7 @@ impl error::Error for GameDayError {
         match *self {
             GameDayError::Request(ref err) => Some(err),
             GameDayError::XMLParse(ref err) => Some(err),
+            GameDayError::QuickXMLParse(ref err) => Some(err),
             GameDayError::JSONParse(ref err) => Some(err),
             GameDayError::Weather(ref err) => Some(err),
             GameDayError::ParseIntError(ref err) => Some(err),
@@ -524,6 +544,12 @@ impl From<isahc::Error> for GameDayError {
 impl From<serde_xml_rs::Error> for GameDayError {
     fn from(err: serde_xml_rs::Error) -> GameDayError {
         GameDayError::XMLParse(err)
+    }
+}
+
+impl From<quick_xml::de::DeError> for GameDayError {
+    fn from(err: quick_xml::de::DeError) -> GameDayError {
+        GameDayError::QuickXMLParse(err)
     }
 }
 
@@ -677,13 +703,26 @@ fn create_inning_links (base: &str, innings: &Vec<LineScore>) -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
+
+fn inning_parse (inning_data: Vec<Response<Body>>) -> Result<Vec<Inning>, GameDayError> {
+
+    inning_data
+        .into_iter()
+        .map(|mut resp| {
+            let inning_xml = resp.text()?;
+            Ok(quick_xml::de::from_str(&inning_xml)?)
+        })
+        .collect()
+}
+
+
 fn inning_xml_parse (http_client: &HttpClient, inning_links: Vec<String>) -> Result<Vec<Inning>, GameDayError> {
 
     inning_links.iter()
         .map(|link| 
             {
                 let inning_xml = http_client.get(link)?.text()?;
-                Ok(serde_xml_rs::from_str(&inning_xml)?)
+                Ok(quick_xml::de::from_str(&inning_xml)?)
             })
         .collect()
 }
@@ -724,86 +763,110 @@ struct PlayerBioGame {
 fn get_player_data
     (http_client: &HttpClient,
      url: &str,
-     player_bio_map: &Arc<RwLock<HashMap<u32, PlayerBio>>>,
+     player_bio_cache: &Arc<RwLock<HashMap<u32, PlayerBio>>>,
+     player_weight_cache: &Arc<RwLock<HashMap<(u32, String, String), PlayerWeightCache>>>,
      player: Player,
     ) 
     -> Result<PlayerBioGame, GameDayError> {
 
-    if player_bio_map.read().unwrap().contains_key(&player.id)  {
-        let player_bio = player_bio_map.read().unwrap().get(&player.id).unwrap().clone();
-        
-        Ok(PlayerBioGame {
-            bio: player_bio,
-            game: player,
-        })
-    }
-    else {
-        let url_json =  String::from("http://statsapi.mlb.com/api/v1/people/") + &player.id.to_string();
 
-        // We pull the primary data from the mlb API as it is more reliable. Eventually, we'll want to avoid doing this once
-        // per game and store a local version that will be checked first. For the first iteration, this simplifies the
-        // implementation considerably.
-        
-        let raw_json_data = &http_client.get(&url_json)?.text()?;
+    // We first check to see if we have any bio data for the player. This will effectively cache the
+    // player's bio once we've grabbed it once. TODO - replace the .unwrap() with proper error handling that
+    // will capture if the RwLock was poisoned. We may also want to keep the .unwrap() and just panic.
 
-        // This is an ugly way to just get at the "people" field, but it has less indirection so doing it this way for now        
-        let json_data = raw_json_data
-                    .split (r#""people" : [ "#)
-                    .nth(1).unwrap_or("")
-                    .trim_end_matches("}")
-                    .trim()
-                    .trim_end_matches("]")
-                    .trim()
-                    ;
+    let mut player_bio = match player_bio_cache.read().unwrap().get(&player.id) {
+        Some(player_bio_cache) => player_bio_cache.clone(),
+        None => {
+            let url_json =  String::from("http://statsapi.mlb.com/api/v1/people/") + &player.id.to_string();
 
-        let mut player_bio: PlayerBio = serde_json::from_str(&json_data)?;
+            // We pull the primary data from the mlb API as it is more reliable. Eventually, we'll want to avoid doing this once
+            // per game and store a local version that will be checked first. For the first iteration, this simplifies the
+            // implementation considerably.
+            
+            let raw_json_data = &http_client.get(&url_json)?.text()?;
 
-        // We want to have our height measurable as an integral number suitable for input into models
-        // First, we split by the ' giving us a small vector of length 1 or 2. We enumerate this vector
-        // and then multiply the first element by 12^1 and the second element by 12^0. If we have a third
-        // element for some reason, this should be an error, but we're ignoring that case for now.
-        player_bio.height_in = player_bio.height
-                        .split('\'')
-                        .filter_map(|h| h.trim().parse().ok())
-                        .enumerate()
-                        .map(|(n, h): (usize, u32)| h * 12u32.pow(1-n as u32))
-                        .sum();   
+            // This is an ugly way to just get at the "people" field, but it has less indirection so doing it this way for now        
+            let json_data = raw_json_data
+                        .split (r#""people" : [ "#)
+                        .nth(1).unwrap_or("")
+                        .trim_end_matches("}")
+                        .trim()
+                        .trim_end_matches("]")
+                        .trim()
+                        ;
 
-        // The GameDay xml has a weight field which holds some potentially interesting historical data. 
-        // The above API only shows the current player's weight, not how much he weighed 10 years ago.
-        // Seeing a player's weight gain curve could be interesting. These data are sometimes missing, so at
-        // some point we'll need to iterate through all those records and 
-        // 
-        // We don't want to propogate an error here, since we don't want this to fail when the file isn't available.player_json
-        // We'll just return none if there's an issue.
+            let mut player_bio: PlayerBio = serde_json::from_str(&json_data)?;
 
-        let url_xml = 
-            if player.position == "P" {
-                String::from(url) + "pitchers/" + &player.id.to_string() + ".xml"
-            }
-            else {
-                String::from(url) + "batters/" + &player.id.to_string() + ".xml"
+            // We want to have our height measurable as an integral number suitable for input into models
+            // First, we split by the ' giving us a small vector of length 1 or 2. We enumerate this vector
+            // and then multiply the first element by 12^1 and the second element by 12^0. If we have a third
+            // element for some reason, this should be an error, but we're ignoring that case for now.
+            player_bio.height_in = player_bio.height
+                            .split('\'')
+                            .filter_map(|h| h.trim().parse().ok())
+                            .enumerate()
+                            .map(|(n, h): (usize, u32)| h * 12u32.pow(1-n as u32))
+                            .sum();
+                            
+            player_bio
+        }
+    };
+
+    
+
+    // This is a really ugly way of getting the year, month. TODO - fix this up, ideally by passing this infrom the initial
+    // function that starts the scraping
+
+    let (year, level) = {
+        let year_month_level: Vec<&str> = url.split("/").collect();
+        // dbg!(&year_month_level);
+        (   
+            year_month_level[6].split("_").nth(1).unwrap().to_string(),
+            year_month_level[5].to_string(),
+        )
+    };
+
+    let player_weight_v2 = match player_weight_cache.read().unwrap().get(&(player.id, year, level)) {
+
+        Some (player_weight_cache) => Some(player_weight_cache.weight),
+        None => {
+
+            // The GameDay xml has a weight field which holds some potentially interesting historical data. 
+            // The above API only shows the current player's weight, not how much he weighed 10 years ago.
+            // Seeing a player's weight gain curve could be interesting. These data are sometimes missing, so at
+            // some point we'll need to iterate through all those records and 
+            // 
+            // We don't want to propogate an error here, since we don't want this to fail when the file isn't available.player_json
+            // We'll just return none if there's an issue.
+
+            let url_xml = 
+                if player.position == "P" {
+                    String::from(url) + "pitchers/" + &player.id.to_string() + ".xml"
+                }
+                else {
+                    String::from(url) + "batters/" + &player.id.to_string() + ".xml"
+                };
+
+            let player_xml_text = match http_client.get(&url_xml) {
+                Ok(mut resp) => resp.text().unwrap(),
+                _ => "".to_string(),
             };
 
-        let player_xml_text = match http_client.get(&url_xml) {
-            Ok(mut resp) => resp.text().unwrap(),
-            _ => "".to_string(),
-        };
+            let player_xml: Result<PlayerXml, quick_xml::de::DeError> = quick_xml::de::from_str(&player_xml_text);
 
-        let player_xml: Result<PlayerXml, serde_xml_rs::Error> = serde_xml_rs::from_str(&player_xml_text);
+            match (player_xml) {
+                Ok(player) => Some(player.weight),
+                Err(e) => None,
+            }
+        }
+    };
 
-        player_bio.weight_v2 = match player_xml {
-            Ok(player) => Some(player.weight),
-            _ => None,
-        };
+    player_bio.weight_v2 = player_weight_v2;
 
-        Ok(PlayerBioGame {
-            bio: player_bio,
-            game: player,
-        })
-    }
-
-
+    Ok(PlayerBioGame {
+        bio: player_bio,
+        game: player,
+    })
 
 
 }
@@ -996,6 +1059,26 @@ fn process_inning_data (inning_data: Vec<Inning>, players: HashMap<u32, PlayerBi
 
 }
 
+
+async fn inning_xml_download (http_client: &HttpClient, inning_links: Vec<String>)
+-> Result<Vec<Response<Body>>, isahc::Error> {
+        futures::future::try_join_all(
+            inning_links.into_iter()
+            .map(|link| http_client.get_async(&link))
+        ).await
+}
+
+type IsahcResponse = Result<Response<Body>, isahc::Error>;
+async fn get_async(linescore: &str, boxscore: &str, players: &str) 
+-> (IsahcResponse, IsahcResponse, IsahcResponse) {
+
+    join!(   
+        isahc::get_async(linescore),
+        isahc::get_async(boxscore),
+        isahc::get_async(players),
+    )
+}
+
 /// Takes in a base url for each game, downloads all the relevant xml files and parses them
 /// 
 /// The linescore.xml file contains imporant metadata about the game, such as venue and date
@@ -1010,26 +1093,44 @@ fn process_inning_data (inning_data: Vec<Inning>, players: HashMap<u32, PlayerBi
 /// 
 
 fn game_download_parse 
-    (http_client: &HttpClient, player_bio_map: &Arc<RwLock<HashMap<u32, PlayerBio>>>, url: &str) 
+    (player_bio_cache: &Arc<RwLock<HashMap<u32, PlayerBio>>>,
+     player_weight_cache: &Arc<RwLock<HashMap<(u32, String, String), PlayerWeightCache>>>,
+     url: &str) 
     -> Result <GameData, GameDayError> {
+
+    let http_client = HttpClient::new().unwrap();
 
     let linescore_url = format!("{}linescore.xml", url);
     let boxscore_url = format!("{}boxscore.xml", url);
     let players_url = format!("{}players.xml", url);
 
+       
     // dbg!(&linescore_url);
+    
+    // let linescore_xml = http_client.get(&linescore_url)?.text()?.replace('&', "&amp;");
+    // let boxscore_xml = http_client.get(&boxscore_url)?.text()?;
+    // let players_xml = http_client.get(&players_url)?.text()?;
 
-    let linescore_xml = http_client.get(&linescore_url)?.text()?.replace('&', "&amp;");
-    let boxscore_xml = http_client.get(&boxscore_url)?.text()?;
-    let players_xml = http_client.get(&players_url)?.text()?; 
+    let (l_xml, b_xml, p_xml) = executor::block_on(get_async(&linescore_url, &boxscore_url, &players_url));
 
-    let linescore_data: LineScoreData = serde_xml_rs::from_str(&linescore_xml)?;
+    let linescore_xml = l_xml?.text()?.replace('&', "&amp;");
+    let boxscore_xml =  b_xml?.text()?;
+    let players_xml =  p_xml?.text()?;   
+
+    let linescore_data: LineScoreData =  quick_xml::de::from_str(&linescore_xml)?;
+
+    // let linescore_data_qml: LineScoreData = quick_xml::de::from_str(&linescore_xml).unwrap();
+    
 
     // dbg!(&linescore_data);
 
     let inning_links = create_inning_links(url, &linescore_data.innings);
     let inning_hit_link = url.to_string() + "inning/inning_hit.xml";
-    let inning_data = inning_xml_parse(http_client, inning_links)?;
+
+    let inning_download = executor::block_on(inning_xml_download(&http_client, inning_links.clone()))?;
+    let inning_data = inning_parse(inning_download)?;
+    
+    // let inning_data = inning_xml_parse(&http_client, inning_links)?;
     
 
     // dbg!(&inning_data[0]);
@@ -1041,19 +1142,40 @@ fn game_download_parse
     let (wind_speed, wind_direction) = parse_weather(items[1])?;
     let attendance: Option<u32> = if items.len() > 2 {parse_attendance(items[2])?} else {None};
 
-    let player_data: Game = serde_xml_rs::from_str(&players_xml)?;
+    // let players_v2: Result<Game, quick_xml::de::DeError> = quick_xml::de::from_str(&players_xml);
+    // dbg!(players_v2);
+
+    let player_data: Game = quick_xml::de::from_str(&players_xml)?;
+
 
     let players: HashMap <u32, PlayerBioGame> = player_data.teams.par_iter()
                         .map(|team| team.players.clone())
                         .flatten()
-                        .filter_map(|player| get_player_data(http_client, url, player_bio_map, player).ok())
+                        .filter_map(|player| get_player_data(&http_client, url, player_bio_cache, player_weight_cache, player).ok())
                         .map(|player| (player.game.id, player))
                         .collect();
 
+    let (year, level) = {
+        let year_month_level: Vec<&str> = url.split("/").collect();
+        (   
+            year_month_level[6].split("_").nth(1).unwrap().to_string(),
+            year_month_level[5].to_string(),
+        )
+    };  
+
     for (id, player) in &players {
-        if player_bio_map.read().unwrap().contains_key(&id) == false {
-            player_bio_map.write().unwrap().insert(*id, player.bio.clone());
-        }
+        if !player_bio_cache.read().unwrap().contains_key(&id) {
+            player_bio_cache.write().unwrap().insert(*id, player.bio.clone());
+        };
+        let key = (*id, year.clone(), level.clone());
+        if !player_weight_cache.read().unwrap().contains_key(&key) && player.bio.weight_v2.is_some() {
+            player_weight_cache.write().unwrap().insert(key, PlayerWeightCache{
+                id: *id,
+                year: year.clone(),
+                level: level.clone(),
+                weight: player.bio.weight_v2.unwrap(),
+            });
+        };
     };                        
    
     let game_umps: GameUmpires = player_data.umpires.into();
@@ -1069,35 +1191,32 @@ fn game_download_parse
 
 fn main () {
 
-    let gd_client = HttpClient::new().unwrap();
-
     let days = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10",
-                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
-                    "21", "22", "23", "24", "25", "26", "27", "28", "29", "30",
-                    "31",
-                    ];
+                "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                "21", "22", "23", "24", "25", "26", "27", "28", "29", "30",
+                "31",];
 
+    let months = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
 
-    let months = ["03", "04", "05", "06", "07", "08", "09", "10"];
-
+    let years = ["2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020"];
 
     let mut game_days: Vec<String> = Vec::with_capacity(4_000);
-    let mut games: Vec<String> = Vec::with_capacity(3_000);
-    
+        
     println! ("Collecting Game Links...");
 
     for month in &months {
         for day in &days {
             let url = game_day_url("mlb", "2008", month, day);
             game_days.push(url);
+            // let url = game_day_url("mlb", "2009", month, day);
+            // game_days.push(url);
         }
     };
 
-
     let games: Vec<String> = game_days.par_iter()
                 .map(|url| game_day_links(&url).unwrap_or(Vec::new()))
-                // .skip(1000)
-                // .take(100)
+                // .skip(100)
+                // .take(1)
                 .flatten()
                 .collect();
     
@@ -1105,21 +1224,25 @@ fn main () {
    
     println! ("Starting game processing...");
 
-    // dbg!(&games[1000]);
+    // dbg!(&games[0]);
 
-    
-    let player_bio_map: Arc<RwLock<HashMap<u32, PlayerBio>>> = 
-        Arc::new(
-            RwLock::new (
-                HashMap::new()
-            )
-        );
+    // Create the main player bio cache structure. We'll send it to each thread through an Arc<RwLock<>>
+    // which will induce a small cost. We'll have two separate RwLocks to use, but since we're loading both
+    // in the same function, we ensure that the locks will always be acquired in the same order, which will
+    // prevent deadlocks (based on my limited understanding of deadlocks).
+    let player_bio_cache: Arc<RwLock<HashMap<u32, PlayerBio>>> = Arc::new(RwLock::new (HashMap::new()));
+
+    // We want to store one player entry per Month, Year and Level of Play. Once per player-year is probably sufficent, but
+    // we're doing a little over-kill here. This likely will entail some measure of performance cost.
+    let player_weight_cache: Arc<RwLock<HashMap<(u32, String, String), PlayerWeightCache>>> = Arc::new(RwLock::new (HashMap::new()));
 
     let game_data: Vec<_> = games.par_iter()
-                // .skip(1000)
-                .take(1000)
-                .map(|game| game_download_parse(&gd_client, &player_bio_map, game))
+                // .skip(1200)
+                // .take(1)
+                .map(|game| game_download_parse(&player_bio_cache, &player_weight_cache, game))
                 .collect(); 
+
+    // dbg!(&game_data[0]);
 
     // for pitch in &game_data[0].as_ref().unwrap().pitches {
     //     if pitch.az == Some(-11.462) || pitch.az == Some(-40.059) {
