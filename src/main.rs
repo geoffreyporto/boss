@@ -708,10 +708,7 @@ fn inning_parse (inning_data: Vec<Response<Body>>) -> Result<Vec<Inning>, GameDa
 
     inning_data
         .into_iter()
-        .map(|mut resp| {
-            let inning_xml = resp.text()?;
-            Ok(quick_xml::de::from_str(&inning_xml)?)
-        })
+        .map(|mut resp| Ok(quick_xml::de::from_str(&resp.text()?)?))
         .collect()
 }
 

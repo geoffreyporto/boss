@@ -12,7 +12,7 @@ TODO
 
 ```toml
 [dependencies]
-baseball = "0.1"
+boss = "0.2"
 ```
 ### Prior Art
 
