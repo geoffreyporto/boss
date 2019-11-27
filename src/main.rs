@@ -11,6 +11,7 @@ use std::collections::{HashMap};
 use std::sync::{Arc, RwLock};
 use std::time;
 use futures::{executor, join, stream::*};
+use csv::Reader;
 
 mod draft;
 
@@ -54,6 +55,59 @@ pub const LEVELS:Levels = Levels {
 };
 
 type GameDayLinks =  Vec<String>;
+
+
+///Final output for the game, flattening out all the fields into a de-normalized table
+#[derive(Serialize, Debug)]
+struct Output {
+    #[serde(flatten)]
+    pitch: Pitch,
+    #[serde(flatten)]
+    umpires: GameUmpires,
+    #[serde(flatten)]
+    line_score_data: LineScoreData,
+    #[serde(flatten)]
+    box_score_data: BoxScoreData,
+    batter_birth_date: String,
+    batter_birth_city: String,
+    batter_birth_country: String,
+    batter_birth_state: String,
+    batter_height: String,
+    batter_height_in: u32,
+    batter_weight: u16,
+    batter_weight_v2: Option<u16>,
+    batter_full_name: String,
+    batter_draft_year: Option<u16>,
+    batter_mlb_debut_date: Option<String>,
+    batter_team_id: u32,
+    batter_team_city: String,
+    batter_team_name: String,
+    batter_manager_id: Option<u32>,
+    batter_manager_name: Option<String>,
+    batter_hitting_coach_id: Option<u32>,
+    batter_hitting_coach_name: Option<String>,
+    batter_bat_order: Option<u8>,
+    batter_game_position: Option<String>,
+    pitcher_birth_date: String,
+    pitcher_birth_city: String,
+    pitcher_birth_country: String,
+    pitcher_birth_state: String,
+    pitcher_height: String,
+    pitcher_height_in: u32,
+    pitcher_weight: u16,
+    pitcher_weight_v2: Option<u16>,
+    pitcher_full_name: String,
+    pitcher_draft_year: Option<u16>,
+    pitcher_mlb_debut_date: Option<String>,
+    pitcher_team_id: u32,
+    pitcher_team_city: String,
+    pitcher_team_name: String,
+    pitcher_manager_id: Option<u32>,
+    pitcher_manager_name: Option<String>,
+    pitcher_pitching_coach_id: Option<u32>,
+    pitcher_pitching_coach_name: Option<String>,
+    pitcher_sp_rp: SPRP,
+}
 
 #[derive(Deserialize, Serialize, Debug)]
 enum HomeAway {
@@ -359,13 +413,8 @@ struct Pitch {
     #[serde(skip_deserializing)]
     plate_appearance_result: String,
 
-    #[serde(skip_deserializing)]
-    batter_bat_order: Option<u8>,
-    #[serde(skip_deserializing)]
-    batter_game_position: Option<String>,
-    #[serde(skip_deserializing)]
-    pitcher_sp_rp: SPRP,
-
+    //This is effectively a bool, however, we will want to use this to produce a swing %, so an int
+    //makes the most sense
     #[serde(skip_deserializing)]
     swing: u8,
 
@@ -380,16 +429,10 @@ struct Pitch {
     
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 enum SPRP {
     SP,
     RP,
-}
-
-impl Default for SPRP {
-    fn default() -> Self {
-        SPRP::RP
-    }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -984,8 +1027,6 @@ fn process_plate_appearance (plate_appearance: PlateAppearance, base_state: u8, 
                 pitch.plate_appearance_pitch_num = pitch_num;
                 pitches.push(pitch);
 
-
-
             }
         }
 
@@ -1124,7 +1165,7 @@ fn game_download_parse
     let inning_links = create_inning_links(url, &linescore_data.innings);
     let inning_hit_link = url.to_string() + "inning/inning_hit.xml";
 
-    let inning_download = executor::block_on(inning_xml_download(&http_client, inning_links.clone()))?;
+    let inning_download = executor::block_on(inning_xml_download(&http_client, inning_links))?;
     let inning_data = inning_parse(inning_download)?;
     
     // let inning_data = inning_xml_parse(&http_client, inning_links)?;
@@ -1152,10 +1193,11 @@ fn game_download_parse
                         .map(|player| (player.game.id, player))
                         .collect();
 
-    let (year, level) = {
+    let (year, month, level) = {
         let year_month_level: Vec<&str> = url.split("/").collect();
         (   
             year_month_level[6].split("_").nth(1).unwrap().to_string(),
+            year_month_level[7].split("_").nth(1).unwrap().to_string(),
             year_month_level[5].to_string(),
         )
     };  
@@ -1184,6 +1226,31 @@ fn game_download_parse
     let game_data = GameData::new(boxscore_data, linescore_data, game_umps, pitches);
 
     Ok(game_data)
+}
+
+#[derive(Debug, Deserialize)]
+struct ParentTeam {
+    season: String,
+    team_id: u32,
+    #[serde(rename="mlb_org_id")]
+    mlb_team_id: u32,
+    #[serde(rename="mlb_org")]
+    mlb_team_name: String,
+}
+
+
+/// Loads pre-built data for parent teams for all mlb seasons
+fn parent_team_load () -> HashMap<(String, u32), (u32, String)> {
+
+    let teams_csv = include_str!("teams.csv");
+    
+    let mut reader = Reader::from_reader(teams_csv.as_bytes());
+    let mut iter = reader.deserialize();
+
+    iter
+        .map(|result| {let record: ParentTeam = result.unwrap(); record})
+        .map(|r| ((r.season, r.team_id),(r.mlb_team_id, r.mlb_team_name)))
+        .collect()       
 }
 
 fn main () {
